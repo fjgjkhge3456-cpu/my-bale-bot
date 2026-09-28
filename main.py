@@ -1,187 +1,238 @@
 import os
+import json
 import sqlite3
 import requests
-from io import BytesIO
-from PIL import Image
 from flask import Flask, request, jsonify
 import google.generativeai as genai
+from PIL import Image
+import io
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
-# ----------------- تنظیمات متغیرهای محیطی -----------------
-BALE_TOKEN = os.environ.get("BALE_TOKEN", "872030909:um2DWEeCRcCd-tkGPyC2Qu-k3FpA-Niaq8")
+# ۱. دریافت متغیرهای محیطی
+BALE_TOKEN = os.environ.get("BALE_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))  # عددی شناسه بله خودت
+ADMIN_ID = os.environ.get("ADMIN_ID")
 
-# تنظیم کلید API گوگل
+# تنظیمات اولیه گوگل جمنای
+gemini_model = None
 if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-    gemini_model = genai.GenerativeModel(
-        model_name="gemini-1.5-flash",
-        system_instruction="تو یک دستیار هوشمند و بسیار مودب، صمیمی و مسلط به زبان فارسی هستی. به تمام سوالات کاربر دقیق، کامل و با لحنی روان پاسخ بده."
-    )
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+        print("--- Gemini API successfully configured ---", flush=True)
+    except Exception as e:
+        print(f"!!! Error configuring Gemini: {e} !!!", flush=True)
+else:
+    print("!!! WARNING: GEMINI_API_KEY is missing !!!", flush=True)
 
-# ----------------- پایگاه داده دیتابیس (اشتراک‌ها) -----------------
+BALE_API_URL = f"https://tapi.bale.ai/bot{BALE_TOKEN}" if BALE_TOKEN else ""
+
+# ۲. پایگاه داده دسکتاپ SQLite برای اشتراک VIP
+DB_NAME = "users.db"
+
 def init_db():
-    conn = sqlite3.connect("users.db")
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            chat_id INTEGER PRIMARY KEY,
-            is_vip INTEGER DEFAULT 0
-        )
-    """)
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS vip_users (
+                user_id INTEGER PRIMARY KEY,
+                expire_date TEXT
+            )
+        ''')
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Database error: {e}", flush=True)
 
 init_db()
 
-def is_user_vip(chat_id):
-    conn = sqlite3.connect("users.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT is_vip FROM users WHERE chat_id = ?", (chat_id,))
-    row = cursor.fetchone()
-    conn.close()
-    return row and row[0] == 1
+def is_vip(user_id):
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("SELECT expire_date FROM vip_users WHERE user_id = ?", (user_id,))
+        result = cursor.fetchone()
+        conn.close()
+        
+        if result:
+            expire_date = datetime.strptime(result[0], "%Y-%m-%d %H:%M:%S")
+            if expire_date > datetime.now():
+                return True
+    except Exception as e:
+        print(f"VIP check error: {e}", flush=True)
+    return False
 
-def set_user_vip(chat_id, status=1):
-    conn = sqlite3.connect("users.db")
+def add_vip_user(user_id, days):
+    expire_date = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO users (chat_id, is_vip) VALUES (?, ?)", (chat_id, status))
+    cursor.execute("INSERT OR REPLACE INTO vip_users (user_id, expire_date) VALUES (?, ?)", (user_id, expire_date))
     conn.commit()
     conn.close()
+    return expire_date
 
-# ----------------- توابع ارسال پیام در بله -----------------
+# ۳. توابع ارتباط با API پیام‌رسان بله
 def send_message(chat_id, text):
-    url = f"https://tapi.bale.ai/bot{BALE_TOKEN}/sendMessage"
+    if not BALE_API_URL:
+        print("Error: BALE_TOKEN is not defined!", flush=True)
+        return
+    url = f"{BALE_API_URL}/sendMessage"
     payload = {"chat_id": chat_id, "text": text}
     try:
-        requests.post(url, json=payload, timeout=10)
+        res = requests.post(url, json=payload, timeout=10)
+        print(f"SendMessage status: {res.status_code}", flush=True)
     except Exception as e:
-        print(f"Error sending message: {e}")
+        print(f"Error sending message to Bale: {e}", flush=True)
 
-def send_photo(chat_id, photo_url, caption=""):
-    url = f"https://tapi.bale.ai/bot{BALE_TOKEN}/sendPhoto"
-    payload = {"chat_id": chat_id, "photo": photo_url, "caption": caption}
+def send_photo(chat_id, photo_bytes, caption=""):
+    url = f"{BALE_API_URL}/sendPhoto"
     try:
-        requests.post(url, json=payload, timeout=20)
+        files = {'photo': ('image.jpg', photo_bytes, 'image/jpeg')}
+        data = {'chat_id': chat_id, 'caption': caption}
+        res = requests.post(url, data=data, files=files, timeout=30)
+        print(f"SendPhoto status: {res.status_code}", flush=True)
     except Exception as e:
-        print(f"Error sending photo: {e}")
+        print(f"Error sending photo to Bale: {e}", flush=True)
 
-def forward_photo_to_admin(photo_file_id, caption):
-    # دانلود فایل از بله و ارسال برای ادمین
-    file_info_url = f"https://tapi.bale.ai/bot{BALE_TOKEN}/getFile?file_id={photo_file_id}"
-    res = requests.get(file_info_url).json()
-    if res.get("ok"):
-        file_path = res["result"]["file_path"]
-        download_url = f"https://tapi.bale.ai/file/bot{BALE_TOKEN}/{file_path}"
-        send_photo(ADMIN_ID, download_url, caption)
-
-# ----------------- دریافت تصویر از بله برای جمنای -----------------
-def get_pil_image_from_bale(file_id):
-    file_info_url = f"https://tapi.bale.ai/bot{BALE_TOKEN}/getFile?file_id={file_id}"
-    res = requests.get(file_info_url).json()
-    if res.get("ok"):
-        file_path = res["result"]["file_path"]
-        download_url = f"https://tapi.bale.ai/file/bot{BALE_TOKEN}/{file_path}"
-        img_data = requests.get(download_url).content
-        return Image.open(BytesIO(img_data))
+def get_bale_file_bytes(file_id):
+    try:
+        res = requests.get(f"{BALE_API_URL}/getFile?file_id={file_id}", timeout=10)
+        file_info = res.json()
+        if file_info.get("ok"):
+            file_path = file_info["result"]["file_path"]
+            file_url = f"https://tapi.bale.ai/file/bot{BALE_TOKEN}/{file_path}"
+            img_res = requests.get(file_url, timeout=20)
+            return img_res.content
+    except Exception as e:
+        print(f"Error downloading file: {e}", flush=True)
     return None
 
-# ----------------- پردازش اصلی وب‌هوک -----------------
-@app.route("/", methods=["POST"])
+# ۴. پردازش پیام‌های دریافتی از وب‌هوک
+@app.route('/', methods=['POST', 'GET'])
 def webhook():
+    if request.method == 'GET':
+        return "Server is Live!", 200
+
     data = request.get_json()
+    print(f"Incoming Update: {json.dumps(data, ensure_ascii=False)}", flush=True)
+
     if not data or "message" not in data:
         return jsonify({"status": "ok"}), 200
 
-    msg = data["message"]
-    chat_id = msg["chat"]["id"]
-    text = msg.get("text", "").strip()
-    caption = msg.get("caption", "").strip()
+    message = data["message"]
+    chat_id = message["chat"]["id"]
+    user_id = message["from"]["id"]
+    text = message.get("text", "").strip()
 
-    # ۱. دستورات عمومی
+    # دستور /start
     if text == "/start":
-        welcome_txt = (
-            "سلام! به ربات هوش مصنوعی خوش آمدید. 🌟\n\n"
-            "✨ **امکانات:**\n"
-            "1️⃣ **سوال متنی:** هر سوالی داری بنویس تا پاسخ دهم.\n"
-            "2️⃣ **تحلیل عکس:** یک عکس بفرست و درباره‌اش سوال بپرس.\n"
-            "3️⃣ **تولید عکس با Flux:** کلمه `عکس:` را اول توصیفت بنویس (مثلاً: `عکس: یک ماشین اسپرت قرمز`).\n"
-            "4️⃣ **ارتقا به حساب VIP:** دستور `/vip` را بفرستید."
+        welcome_msg = (
+            "سلام! به ربات هوش مصنوعی خوش آمدید 🤖✨\n\n"
+            "امکانات ربات:\n"
+            "1️⃣ چت متنی با Gemini (سوال خود را بنویسید)\n"
+            "2️⃣ ساخت عکس با Flux (مثال: عکس: یک ماشین اسپرت)\n"
+            "3️⃣ تحلیل عکس (عکس بفرستید و سوال بپرسید)\n"
+            "4️⃣ وضعیت اشتراک با دستور /vip"
         )
-        send_message(chat_id, welcome_txt)
+        send_message(chat_id, welcome_msg)
         return jsonify({"status": "ok"}), 200
 
-    # ۲. دستور خرید اشتراک
-    if text == "/vip":
-        vip_info = (
-            "💎 **خرید اشتراک VIP**\n\n"
-            "برای استفاده نامحدود و سرعت بالا می‌توانید اشتراک تهیه کنید:\n"
-            "💳 **شماره کارت:** `6037-9918-0000-0000` (به نام تولیدی تهران)\n"
-            "💵 **مبلغ ماهانه:** ۵۰,۰۰۰ تومان\n\n"
-            "👇 **راهنما:** پس از واریز، **تصویر فیش واریزی** را همین‌جا ارسال کنید تا حساب شما فعال شود."
+    # دستور /vip
+    elif text == "/vip":
+        vip_status = "فعال ✅" if is_vip(user_id) else "غیرفعال ❌"
+        vip_msg = (
+            f"اطلاعات حساب VIP شما:\n"
+            f"آیدی عددی شما: {user_id}\n"
+            f"وضعیت اشتراک: {vip_status}\n\n"
+            f"💳 جهت خرید اشتراک VIP:\n"
+            f"مبلغ: ۵۰,۰۰۰ تومان\n"
+            f"شماره کارت: 6037-9999-9999-9999 (به نام مدیر)\n\n"
+            f"پس از واریز، فیش را برای پشتیبانی بفرستید."
         )
-        send_message(chat_id, vip_info)
+        send_message(chat_id, vip_msg)
         return jsonify({"status": "ok"}), 200
 
-    # ۳. دستور ادمین برای فعال‌سازی اشتراک: /addvip 1234567
-    if text.startswith("/addvip") and chat_id == ADMIN_ID:
-        parts = text.split()
-        if len(parts) > 1:
-            target_id = int(parts[1])
-            set_user_vip(target_id, 1)
-            send_message(ADMIN_ID, f"✅ اشتراک VIP برای کاربر {target_id} فعال شد.")
-            send_message(target_id, "🎉 تبریک! اشتراک VIP شما با موفقیت فعال شد.")
-        return jsonify({"status": "ok"}), 200
-
-    # ۴. اگر کاربر تصویر ارسال کرده باشد (فیش واریزی یا تحلیل عکس)
-    if "photo" in msg:
-        photos = msg["photo"]
-        largest_photo = photos[-1]  # بهترین کیفیت
-        file_id = largest_photo["file_id"]
-
-        # اگر کپشن شامل سوال بود -> تحلیل عکس با جمنای
-        if caption or "تحلیل" in caption:
-            send_message(chat_id, "🔍 در حال بررسی و تحلیل تصویر...")
-            img = get_pil_image_from_bale(file_id)
-            if img:
-                prompt = caption if caption else "این تصویر را به دقت توضیح بده."
-                response = gemini_model.generate_content([prompt, img])
-                send_message(chat_id, response.text)
-            else:
-                send_message(chat_id, "خطا در دریافت تصویر.")
+    # دستور ارتقا به VIP توسط مدیر
+    elif text.startswith("/addvip"):
+        if str(user_id) == str(ADMIN_ID):
+            try:
+                parts = text.split()
+                target_user_id = int(parts[1])
+                days = int(parts[2])
+                exp_date = add_vip_user(target_user_id, days)
+                send_message(chat_id, f"✅ کاربر {target_user_id} به مدت {days} روز VIP شد.\nانقضا: {exp_date}")
+            except Exception as e:
+                send_message(chat_id, "فرمت اشتباه است! مثال صحیح:\n/addvip 123456789 30")
         else:
-            # ارسال فیش برای ادمین جهت تایید
-            send_message(chat_id, "📩 فیش واریزی شما دریافت شد و برای ادمین ارسال گردید. به‌زودی بررسی می‌شود.")
-            info_text = f"💳 **فیش واریزی جدید**\nشناسه کاربر: `{chat_id}`\n\nبرای فعال‌سازی دستور زیر را بزنید:\n`/addvip {chat_id}`"
-            forward_photo_to_admin(file_id, info_text)
-
+            send_message(chat_id, "شما دسترسی مدیریتی ندارید.")
         return jsonify({"status": "ok"}), 200
 
-    # ۵. تولید عکس با Flux (مثال: عکس: یک فضانورد در مریخ)
-    if text.startswith("عکس:") or text.startswith("/image"):
-        prompt = text.replace("عکس:", "").replace("/image", "").strip()
+    # ساخت عکس با Pollinations (Flux)
+    if text.lower().startswith("عکس:") or text.lower().startswith("image:"):
+        prompt = text.split(":", 1)[1].strip()
         if not prompt:
-            send_message(chat_id, "لطفاً توصیف عکس را بنویسید. مثال:\n`عکس: یک کلبه چوبی در جنگل برفی`")
+            send_message(chat_id, "لطفاً بعد از 'عکس:' توصیف تصویر را بنویسید.")
             return jsonify({"status": "ok"}), 200
 
-        send_message(chat_id, "🎨 در حال ساخت تصویر با مدل Flux... لطفاً چند ثانیه صبر کنید.")
-        # استفاده از مدل Flux بدون نیاز به API Key
-        flux_url = f"https://image.pollinations.ai/prompt/{prompt}?model=flux&width=1024&height=1024&nologo=true"
-        send_photo(chat_id, flux_url, f"🖼 تصویر ساخته شده برای: {prompt}")
+        send_message(chat_id, "🎨 در حال ساخت تصویر با Flux... کمی صبر کنید.")
+        try:
+            image_url = f"https://image.pollinations.ai/prompt/{requests.utils.quote(prompt)}?model=flux&width=1024&height=1024"
+            img_res = requests.get(image_url, timeout=40)
+            if img_res.status_code == 200:
+                send_photo(chat_id, img_res.content, caption=f"🖼 تصویر ساخته شده برای: {prompt}")
+            else:
+                send_message(chat_id, f"خطا در ساخت تصویر (کد: {img_res.status_code})")
+        except Exception as e:
+            print(f"Flux Error: {e}", flush=True)
+            send_message(chat_id, f"خطا در ارتباط با سرور تصویرساز: {e}")
         return jsonify({"status": "ok"}), 200
 
-    # ۶. گفتگو و پاسخ متنی معمولی با Gemini
+    # تحلیل تصویر (Vision)
+    if "photo" in message:
+        photos = message["photo"]
+        file_id = photos[-1]["file_id"]
+        caption = message.get("caption", "این عکس را به دقت تحلیل و توصیف کن.")
+
+        send_message(chat_id, "🔍 در حال تحلیل تصویر با Gemini...")
+        try:
+            photo_bytes = get_bale_file_bytes(file_id)
+            if photo_bytes and gemini_model:
+                image = Image.open(io.BytesIO(photo_bytes))
+                response = gemini_model.generate_content([caption, image])
+                send_message(chat_id, response.text)
+            else:
+                send_message(chat_id, "دریافت تصویر یا کلید Gemini با مشکل مواجه شد.")
+        except Exception as e:
+            print(f"Gemini Vision Error: {e}", flush=True)
+            send_message(chat_id, f"خطا در تحلیل تصویر: {e}")
+        return jsonify({"status": "ok"}), 200
+
+    # چت متنی با Gemini
     if text:
         send_message(chat_id, "🤔 در حال تفکر...")
         try:
+            if not GEMINI_API_KEY:
+                send_message(chat_id, "❌ کلید GEMINI_API_KEY در تنظیمات Render وارد نشده است!")
+                return jsonify({"status": "ok"}), 200
+
+            if not gemini_model:
+                send_message(chat_id, "❌ مدل Gemini آماده نیست. احتمالاً API Key اشتباه است.")
+                return jsonify({"status": "ok"}), 200
+
             response = gemini_model.generate_content(text)
-            send_message(chat_id, response.text)
+            if response and hasattr(response, 'text') and response.text:
+                send_message(chat_id, response.text)
+            else:
+                print(f"Empty response from Gemini: {response}", flush=True)
+                send_message(chat_id, "پاسخ خالی از جمنای دریافت شد.")
         except Exception as e:
-            send_message(chat_id, "متأسفانه مشکلی در پاسخگویی پیش آمد. دوباره تلاش کنید.")
+            print(f"!!! CRITICAL GEMINI ERROR: {e} !!!", flush=True)
+            send_message(chat_id, f"متأسفانه مشکلی پیش آمد:\n{e}")
 
     return jsonify({"status": "ok"}), 200
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
