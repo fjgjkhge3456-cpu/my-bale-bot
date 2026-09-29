@@ -27,47 +27,41 @@ else:
 
 BALE_API_URL = f"https://tapi.bale.ai/bot{BALE_TOKEN}" if BALE_TOKEN else ""
 
-# تابع هوشمند: استعلام خودکار لیست مدل‌ها از API گوگل و انتخاب بهترین مدل
+# تابع هوشمند: لیست مدل‌ها را می‌گیرد و پیشوند اضافی models/ را پاک می‌کند
 def generate_gemini_response(contents):
     if not GEMINI_API_KEY:
         return "❌ کلید GEMINI_API_KEY در تنظیمات Render وارد نشده است."
 
+    # اولویت با مدل‌های سبک و سریع جمنای
+    candidate_models = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-1.0-pro']
+    
+    # ابتدا سعی می‌کنیم مدل‌های فعال اکانت را دریافت کنیم
     try:
-        # دریافت مستقیم لیست مدل‌های پشتیبانی‌شده از گوگل
-        available_models = []
         for m in genai.list_models():
             if 'generateContent' in m.supported_generation_methods:
-                available_models.append(m.name)
-
-        print(f"Available Gemini models from API: {available_models}", flush=True)
-
-        if not available_models:
-            return "❌ هیچ مدل فعالی با قابلیت چت در اکانت شما پیدا نشد."
-
-        # انتخاب خودکار: اولویت با مدل‌های flash است، در غیر این صورت اولین مدل در دسترس انتخاب می‌شود
-        selected_model = None
-        for model_name in available_models:
-            if 'flash' in model_name.lower():
-                selected_model = model_name
-                break
-
-        if not selected_model:
-            selected_model = available_models[0]
-
-        print(f"--- Auto-selected Model: {selected_model} ---", flush=True)
-
-        # تولید پاسخ با مدل انتخاب‌شده
-        model = genai.GenerativeModel(selected_model)
-        response = model.generate_content(contents)
-
-        if response and hasattr(response, 'text') and response.text:
-            return response.text
-        else:
-            return "پاسخ خالی از جمنای دریافت شد."
-
+                # حذف پیشوند models/ جهت جلوگیری از خطای 404
+                clean_name = m.name.replace('models/', '')
+                if clean_name not in candidate_models:
+                    candidate_models.append(clean_name)
     except Exception as e:
-        print(f"!!! DYNAMIC GEMINI ERROR: {e} !!!", flush=True)
-        raise Exception(f"خطا در دریافت پاسخ از گوگل: {e}")
+        print(f"Could not fetch list_models: {e}", flush=True)
+
+    last_error = None
+    for model_name in candidate_models:
+        try:
+            clean_name = model_name.replace('models/', '')
+            print(f"Trying model: {clean_name}", flush=True)
+            model = genai.GenerativeModel(clean_name)
+            response = model.generate_content(contents)
+            
+            if response and hasattr(response, 'text') and response.text:
+                return response.text
+        except Exception as e:
+            last_error = e
+            print(f"Model {model_name} failed: {e}", flush=True)
+            continue
+
+    raise Exception(f"خطا در دریافت پاسخ از مدل‌ها: {last_error}")
 
 # ۲. پایگاه داده SQLite برای اشتراک VIP
 DB_NAME = "users.db"
