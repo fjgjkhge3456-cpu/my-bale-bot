@@ -16,20 +16,47 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 ADMIN_ID = os.environ.get("ADMIN_ID")
 
 # تنظیمات اولیه گوگل جمنای
-gemini_model = None
 if GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
-        gemini_model = genai.GenerativeModel('gemini-1.5-flash')
-        print("--- Gemini API successfully configured ---", flush=True)
+        print("--- Gemini API configured successfully ---", flush=True)
     except Exception as e:
-        print(f"!!! Error configuring Gemini: {e} !!!", flush=True)
+        print(f"!!! Error configuring Gemini API: {e} !!!", flush=True)
 else:
     print("!!! WARNING: GEMINI_API_KEY is missing !!!", flush=True)
 
 BALE_API_URL = f"https://tapi.bale.ai/bot{BALE_TOKEN}" if BALE_TOKEN else ""
 
-# ۲. پایگاه داده دسکتاپ SQLite برای اشتراک VIP
+# تابع هوشمند برای تولید محتوا با پشتیبانی از چند مدل جمنای
+def generate_gemini_response(contents):
+    if not GEMINI_API_KEY:
+        return "❌ کلید GEMINI_API_KEY در تنظیمات Render وارد نشده است."
+
+    # فهرست مدل‌های پشتیبانی‌شده به ترتیب اولویت
+    models_to_try = [
+        'gemini-1.5-flash-latest',
+        'gemini-2.0-flash',
+        'gemini-1.5-flash',
+        'gemini-1.5-pro',
+        'gemini-pro'
+    ]
+
+    last_error = None
+    for model_name in models_to_try:
+        try:
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(contents)
+            if response and hasattr(response, 'text') and response.text:
+                print(f"--- Successfully generated response using model: {model_name} ---", flush=True)
+                return response.text
+        except Exception as e:
+            last_error = e
+            print(f"Model {model_name} failed: {e}. Trying next model...", flush=True)
+            continue
+
+    raise Exception(f"همه مدل‌ها با خطا مواجه شدند. آخرین خطا: {last_error}")
+
+# ۲. پایگاه داده SQLite برای اشتراک VIP
 DB_NAME = "users.db"
 
 def init_db():
@@ -199,35 +226,23 @@ def webhook():
         send_message(chat_id, "🔍 در حال تحلیل تصویر با Gemini...")
         try:
             photo_bytes = get_bale_file_bytes(file_id)
-            if photo_bytes and gemini_model:
+            if photo_bytes:
                 image = Image.open(io.BytesIO(photo_bytes))
-                response = gemini_model.generate_content([caption, image])
-                send_message(chat_id, response.text)
+                answer = generate_gemini_response([caption, image])
+                send_message(chat_id, answer)
             else:
-                send_message(chat_id, "دریافت تصویر یا کلید Gemini با مشکل مواجه شد.")
+                send_message(chat_id, "خطا در دریافت فایل تصویر از بله.")
         except Exception as e:
             print(f"Gemini Vision Error: {e}", flush=True)
-            send_message(chat_id, f"خطا در تحلیل تصویر: {e}")
+            send_message(chat_id, f"خطا در تحلیل تصویر:\n{e}")
         return jsonify({"status": "ok"}), 200
 
     # چت متنی با Gemini
     if text:
         send_message(chat_id, "🤔 در حال تفکر...")
         try:
-            if not GEMINI_API_KEY:
-                send_message(chat_id, "❌ کلید GEMINI_API_KEY در تنظیمات Render وارد نشده است!")
-                return jsonify({"status": "ok"}), 200
-
-            if not gemini_model:
-                send_message(chat_id, "❌ مدل Gemini آماده نیست. احتمالاً API Key اشتباه است.")
-                return jsonify({"status": "ok"}), 200
-
-            response = gemini_model.generate_content(text)
-            if response and hasattr(response, 'text') and response.text:
-                send_message(chat_id, response.text)
-            else:
-                print(f"Empty response from Gemini: {response}", flush=True)
-                send_message(chat_id, "پاسخ خالی از جمنای دریافت شد.")
+            answer = generate_gemini_response(text)
+            send_message(chat_id, answer)
         except Exception as e:
             print(f"!!! CRITICAL GEMINI ERROR: {e} !!!", flush=True)
             send_message(chat_id, f"متأسفانه مشکلی پیش آمد:\n{e}")
