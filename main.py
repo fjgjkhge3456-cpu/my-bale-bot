@@ -27,34 +27,47 @@ else:
 
 BALE_API_URL = f"https://tapi.bale.ai/bot{BALE_TOKEN}" if BALE_TOKEN else ""
 
-# تابع هوشمند برای تولید محتوا با پشتیبانی از چند مدل جمنای
+# تابع هوشمند: استعلام خودکار لیست مدل‌ها از API گوگل و انتخاب بهترین مدل
 def generate_gemini_response(contents):
     if not GEMINI_API_KEY:
         return "❌ کلید GEMINI_API_KEY در تنظیمات Render وارد نشده است."
 
-    # فهرست مدل‌های پشتیبانی‌شده به ترتیب اولویت
-    models_to_try = [
-        'gemini-1.5-flash-latest',
-        'gemini-2.0-flash',
-        'gemini-1.5-flash',
-        'gemini-1.5-pro',
-        'gemini-pro'
-    ]
+    try:
+        # دریافت مستقیم لیست مدل‌های پشتیبانی‌شده از گوگل
+        available_models = []
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                available_models.append(m.name)
 
-    last_error = None
-    for model_name in models_to_try:
-        try:
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(contents)
-            if response and hasattr(response, 'text') and response.text:
-                print(f"--- Successfully generated response using model: {model_name} ---", flush=True)
-                return response.text
-        except Exception as e:
-            last_error = e
-            print(f"Model {model_name} failed: {e}. Trying next model...", flush=True)
-            continue
+        print(f"Available Gemini models from API: {available_models}", flush=True)
 
-    raise Exception(f"همه مدل‌ها با خطا مواجه شدند. آخرین خطا: {last_error}")
+        if not available_models:
+            return "❌ هیچ مدل فعالی با قابلیت چت در اکانت شما پیدا نشد."
+
+        # انتخاب خودکار: اولویت با مدل‌های flash است، در غیر این صورت اولین مدل در دسترس انتخاب می‌شود
+        selected_model = None
+        for model_name in available_models:
+            if 'flash' in model_name.lower():
+                selected_model = model_name
+                break
+
+        if not selected_model:
+            selected_model = available_models[0]
+
+        print(f"--- Auto-selected Model: {selected_model} ---", flush=True)
+
+        # تولید پاسخ با مدل انتخاب‌شده
+        model = genai.GenerativeModel(selected_model)
+        response = model.generate_content(contents)
+
+        if response and hasattr(response, 'text') and response.text:
+            return response.text
+        else:
+            return "پاسخ خالی از جمنای دریافت شد."
+
+    except Exception as e:
+        print(f"!!! DYNAMIC GEMINI ERROR: {e} !!!", flush=True)
+        raise Exception(f"خطا در دریافت پاسخ از گوگل: {e}")
 
 # ۲. پایگاه داده SQLite برای اشتراک VIP
 DB_NAME = "users.db"
@@ -83,7 +96,7 @@ def is_vip(user_id):
         cursor.execute("SELECT expire_date FROM vip_users WHERE user_id = ?", (user_id,))
         result = cursor.fetchone()
         conn.close()
-        
+
         if result:
             expire_date = datetime.strptime(result[0], "%Y-%m-%d %H:%M:%S")
             if expire_date > datetime.now():
