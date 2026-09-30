@@ -15,6 +15,17 @@ BALE_TOKEN = os.environ.get("BALE_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 ADMIN_ID = os.environ.get("ADMIN_ID")
 
+# دستورالعمل سیستم برای لحن صمیمی، روون، همراه با ایموجی و بدون تکرار
+SYSTEM_INSTRUCTION = (
+    "تو یک دستیار هوش مصنوعی بسیار هوشمند، صمیمی، خاکی و جذاب هستی. "
+    "قوانین اصلی پاسخ‌دهی تو:\n"
+    "۱. همیشه به زبان فارسی روان، طبیعی و گفتگو محور (مثل یک دوست صمیمی) صحبت کن.\n"
+    "۲. حتماً از ایموجی‌های متناسب و قشنگ (مثل ✨، 🤖، 💡، 🔥) در متن استفاده کن.\n"
+    "۳. اصلاً جملات تکراری، مقدمه‌های کلیشه‌ای (مثل «در پاسخ به سوال شما...») یا تکرار سوال کاربر را بکار نبر.\n"
+    "۴. مستقیم و بدون زیاده‌گویی بگو اصل مطلب چیست.\n"
+    "۵. از ارائه جدول‌های خشک، تحلیل‌های لغوی یا دیکشنری‌وار خودداری کن مگر اینکه کاربر خودش خواسته باشد."
+)
+
 # تنظیمات اولیه گوگل جمنای
 if GEMINI_API_KEY:
     try:
@@ -27,19 +38,16 @@ else:
 
 BALE_API_URL = f"https://tapi.bale.ai/bot{BALE_TOKEN}" if BALE_TOKEN else ""
 
-# تابع هوشمند: لیست مدل‌ها را می‌گیرد و پیشوند اضافی models/ را پاک می‌کند
+# تابع هوشمند دریافت پاسخ از جمنای
 def generate_gemini_response(contents):
     if not GEMINI_API_KEY:
         return "❌ کلید GEMINI_API_KEY در تنظیمات Render وارد نشده است."
 
-    # اولویت با مدل‌های سبک و سریع جمنای
     candidate_models = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-1.0-pro']
     
-    # ابتدا سعی می‌کنیم مدل‌های فعال اکانت را دریافت کنیم
     try:
         for m in genai.list_models():
             if 'generateContent' in m.supported_generation_methods:
-                # حذف پیشوند models/ جهت جلوگیری از خطای 404
                 clean_name = m.name.replace('models/', '')
                 if clean_name not in candidate_models:
                     candidate_models.append(clean_name)
@@ -51,7 +59,12 @@ def generate_gemini_response(contents):
         try:
             clean_name = model_name.replace('models/', '')
             print(f"Trying model: {clean_name}", flush=True)
-            model = genai.GenerativeModel(clean_name)
+            
+            # تنظیم مدل به همراه پرامپت لحن‌دهی
+            model = genai.GenerativeModel(
+                model_name=clean_name,
+                system_instruction=SYSTEM_INSTRUCTION
+            )
             response = model.generate_content(contents)
             
             if response and hasattr(response, 'text') and response.text:
