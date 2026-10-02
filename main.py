@@ -3,6 +3,7 @@ import json
 import sqlite3
 import requests
 import threading
+import re
 from flask import Flask, request, jsonify
 import google.generativeai as genai
 from PIL import Image
@@ -16,55 +17,62 @@ BALE_TOKEN = os.environ.get("BALE_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 ADMIN_ID = os.environ.get("ADMIN_ID")
 
-# تنظیمات اولیه گوگل جمنای
+BALE_API_URL = f"https://tapi.bale.ai/bot{BALE_TOKEN}" if BALE_TOKEN else ""
+
+# حافظه موقت برای جلوگیری از پیام‌های تکراری
+PROCESSED_UPDATES = set()
+MAX_CACHE_SIZE = 2000
+
+# دستورالعمل سیستم کوتاه و کاملا مستقیم
+SYSTEM_INSTRUCTION = "پاسخ را فقط و فقط به زبان فارسی، روان، صمیمی و بدون هیچ متن اضافه، تحلیل یا ترجمه‌ای بنویس."
+
+# لیست مدل‌ها - فقط یک‌بار در ابتدای اجرا لود می‌شود تا سرعت افت نکند
+CACHED_MODELS = ['gemini-1.5-flash', 'gemini-1.5-pro']
+
 if GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
         print("--- Gemini API configured successfully ---", flush=True)
+        # گرفتن لیست مدل‌ها در استارت‌آپ (یک‌بار برای همیشه)
+        try:
+            fetched_models = []
+            for m in genai.list_models():
+                if 'generateContent' in m.supported_generation_methods:
+                    clean_name = m.name.replace('models/', '')
+                    if clean_name not in fetched_models:
+                        fetched_models.append(clean_name)
+            if fetched_models:
+                CACHED_MODELS = fetched_models
+            print(f"Loaded models on startup: {CACHED_MODELS}", flush=True)
+        except Exception as e:
+            print(f"Could not fetch list_models on startup: {e}", flush=True)
     except Exception as e:
         print(f"!!! Error configuring Gemini API: {e} !!!", flush=True)
-else:
-    print("!!! WARNING: GEMINI_API_KEY is missing !!!", flush=True)
 
-BALE_API_URL = f"https://tapi.bale.ai/bot{BALE_TOKEN}" if BALE_TOKEN else ""
-
-# حافظه موقت برای جلوگیری از پردازش پیام‌های تکراری
-PROCESSED_UPDATES = set()
-MAX_CACHE_SIZE = 2000
-
-# دستورالعمل سیستم جهت هدایت جمنای به پاسخ‌دهی مستقیم و فارسی
-SYSTEM_INSTRUCTION = (
-    "تو یک دستیار هوش مصنوعی صمیمی، هوشمند و فارسی‌زبان هستی. "
-    "همیشه فقط پاسخ نهایی و مستقیم را به زبان فارسی، روان و صمیمی بنویس. "
-    "از آوردن فرآیند تفکر، ترجمه انگلیسی، تحلیل متن کاربر، یا ارائه گزینه‌های متعدد (Option 1/Option 2) جداً خودداری کن."
-)
+# تابع پاکسازی متن‌های تحلیلی احتمالی
+def clean_bot_response(text):
+    if not text:
+        return ""
+    # حذف خطوطی که شامل عبارت‌های تحلیلی یا انگلیسی هستند
+    lines = text.strip().split('\n')
+    filtered_lines = []
+    for line in lines:
+        if any(keyword in line for keyword in ['User input', 'Constraint', 'Persona', 'Final response', 'Option 1', 'Meaning:']):
+            continue
+        filtered_lines.append(line)
+    
+    result = '\n'.join(filtered_lines).strip()
+    return result if result else text.strip()
 
 # تابع هوشمند دریافت پاسخ جمنای
 def generate_gemini_response(contents):
     if not GEMINI_API_KEY:
         return "❌ کلید GEMINI_API_KEY در تنظیمات Render وارد نشده است."
 
-    # اولویت با مدل‌های سبک و سریع جمنای
-    candidate_models = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-1.0-pro']
-    
-    # ابتدا سعی می‌کنیم مدل‌های فعال اکانت را دریافت کنیم
-    try:
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                # حذف پیشوند models/ جهت جلوگیری از خطای 404
-                clean_name = m.name.replace('models/', '')
-                if clean_name not in candidate_models:
-                    candidate_models.append(clean_name)
-    except Exception as e:
-        print(f"Could not fetch list_models: {e}", flush=True)
-
     last_error = None
-    for model_name in candidate_models:
+    for model_name in CACHED_MODELS:
         try:
             clean_name = model_name.replace('models/', '')
-            print(f"Trying model: {clean_name}", flush=True)
-            
-            # تنظیم مدل با system_instruction
             model = genai.GenerativeModel(
                 model_name=clean_name,
                 system_instruction=SYSTEM_INSTRUCTION
@@ -72,13 +80,14 @@ def generate_gemini_response(contents):
             response = model.generate_content(contents)
             
             if response and hasattr(response, 'text') and response.text:
-                return response.text
+                cleaned_text = clean_bot_response(response.text)
+                return cleaned_text
         except Exception as e:
             last_error = e
             print(f"Model {model_name} failed: {e}", flush=True)
             continue
 
-    raise Exception(f"خطا در دریافت پاسخ از مدل‌ها: {last_error}")
+    return f"⚠️ خطا در دریافت پاسخ از مدل‌ها: {last_error}"
 
 # ۲. پایگاه داده SQLite برای اشتراک VIP
 DB_NAME = "users.db"
@@ -128,13 +137,11 @@ def add_vip_user(user_id, days):
 # ۳. توابع ارتباط با API پیام‌رسان بله
 def send_message(chat_id, text):
     if not BALE_API_URL:
-        print("Error: BALE_TOKEN is not defined!", flush=True)
         return
     url = f"{BALE_API_URL}/sendMessage"
     payload = {"chat_id": chat_id, "text": text}
     try:
         res = requests.post(url, json=payload, timeout=10)
-        print(f"SendMessage status: {res.status_code}", flush=True)
     except Exception as e:
         print(f"Error sending message to Bale: {e}", flush=True)
 
@@ -144,7 +151,6 @@ def send_photo(chat_id, photo_bytes, caption=""):
         files = {'photo': ('image.jpg', photo_bytes, 'image/jpeg')}
         data = {'chat_id': chat_id, 'caption': caption}
         res = requests.post(url, data=data, files=files, timeout=30)
-        print(f"SendPhoto status: {res.status_code}", flush=True)
     except Exception as e:
         print(f"Error sending photo to Bale: {e}", flush=True)
 
@@ -161,7 +167,7 @@ def get_bale_file_bytes(file_id):
         print(f"Error downloading file: {e}", flush=True)
     return None
 
-# ۴. پردازش پس‌زمینه پیام‌ها (اجرا در Thread جداگانه)
+# ۴. پردازش پس‌زمینه پیام‌ها
 def process_update_async(data):
     if not data or "message" not in data:
         return
@@ -271,12 +277,11 @@ def webhook():
         return "Server is Live!", 200
 
     data = request.get_json()
-    print(f"Incoming Update: {json.dumps(data, ensure_ascii=False)}", flush=True)
 
     if not data:
         return jsonify({"status": "ok"}), 200
 
-    # جلوگیری از پردازش درخواست‌های تکراری بله
+    # جلوگیری از پردازش درخواست‌های تکراری
     update_id = data.get("update_id")
     if update_id:
         if update_id in PROCESSED_UPDATES:
@@ -287,7 +292,7 @@ def webhook():
         if len(PROCESSED_UPDATES) > MAX_CACHE_SIZE:
             PROCESSED_UPDATES.clear()
 
-    # ارجاع پردازش به یک Thread مجزا تا وب‌هوک سریعاً پاسخ 200 دهد
+    # ارجاع پردازش به یک Thread مجزا تا وب‌هوک سریعاً پاسخ 200 بدهد
     threading.Thread(target=process_update_async, args=(data,)).start()
 
     return jsonify({"status": "ok"}), 200
