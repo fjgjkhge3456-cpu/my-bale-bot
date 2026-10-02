@@ -3,7 +3,7 @@ import json
 import sqlite3
 import requests
 import threading
-import re
+import urllib.parse
 from flask import Flask, request, jsonify
 import google.generativeai as genai
 from PIL import Image
@@ -23,17 +23,16 @@ BALE_API_URL = f"https://tapi.bale.ai/bot{BALE_TOKEN}" if BALE_TOKEN else ""
 PROCESSED_UPDATES = set()
 MAX_CACHE_SIZE = 2000
 
-# دستورالعمل سیستم کوتاه و کاملا مستقیم
-SYSTEM_INSTRUCTION = "پاسخ را فقط و فقط به زبان فارسی، روان، صمیمی و بدون هیچ متن اضافه، تحلیل یا ترجمه‌ای بنویس."
+# دستورالعمل سیستم کوتاه و مستقیم
+SYSTEM_INSTRUCTION = "پاسخ را فقط و فقط به زبان فارسی، روان و صمیمی بنویس."
 
-# لیست مدل‌ها - فقط یک‌بار در ابتدای اجرا لود می‌شود تا سرعت افت نکند
+# کش کردن مدل‌های جمنای
 CACHED_MODELS = ['gemini-1.5-flash', 'gemini-1.5-pro']
 
 if GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
         print("--- Gemini API configured successfully ---", flush=True)
-        # گرفتن لیست مدل‌ها در استارت‌آپ (یک‌بار برای همیشه)
         try:
             fetched_models = []
             for m in genai.list_models():
@@ -49,15 +48,15 @@ if GEMINI_API_KEY:
     except Exception as e:
         print(f"!!! Error configuring Gemini API: {e} !!!", flush=True)
 
-# تابع پاکسازی متن‌های تحلیلی احتمالی
+# پاکسازی هوشمند پاسخ‌های جمنای از متون تحلیلی
 def clean_bot_response(text):
     if not text:
         return ""
-    # حذف خطوطی که شامل عبارت‌های تحلیلی یا انگلیسی هستند
     lines = text.strip().split('\n')
     filtered_lines = []
     for line in lines:
-        if any(keyword in line for keyword in ['User input', 'Constraint', 'Persona', 'Final response', 'Option 1', 'Meaning:']):
+        l = line.strip().lower()
+        if any(keyword in l for keyword in ['user input', 'constraint', 'persona', 'final response', 'option 1', 'meaning:', 'check against']):
             continue
         filtered_lines.append(line)
     
@@ -141,7 +140,7 @@ def send_message(chat_id, text):
     url = f"{BALE_API_URL}/sendMessage"
     payload = {"chat_id": chat_id, "text": text}
     try:
-        res = requests.post(url, json=payload, timeout=10)
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
         print(f"Error sending message to Bale: {e}", flush=True)
 
@@ -150,7 +149,7 @@ def send_photo(chat_id, photo_bytes, caption=""):
     try:
         files = {'photo': ('image.jpg', photo_bytes, 'image/jpeg')}
         data = {'chat_id': chat_id, 'caption': caption}
-        res = requests.post(url, data=data, files=files, timeout=30)
+        requests.post(url, data=data, files=files, timeout=30)
     except Exception as e:
         print(f"Error sending photo to Bale: {e}", flush=True)
 
@@ -166,6 +165,30 @@ def get_bale_file_bytes(file_id):
     except Exception as e:
         print(f"Error downloading file: {e}", flush=True)
     return None
+
+# تابع اختصاصی تولید و ارسال عکس (پشتیبانی از چند مدل)
+def generate_and_send_image(chat_id, prompt, model_type="flux"):
+    if not prompt:
+        send_message(chat_id, "لطفاً بعد از دستور، توصیف تصویر را بنویسید.")
+        return
+
+    model_display_name = "فلاکس (Flux)" if model_type == "flux" else "جمنای/ایمجین (Imagen)"
+    send_message(chat_id, f"🎨 در حال ساخت تصویر با مدل {model_display_name}... لطفاً کمی صبر کنید.")
+
+    try:
+        encoded_prompt = urllib.parse.quote(prompt)
+        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?model={model_type}&width=1024&height=1024&nologo=true"
+        
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        img_res = requests.get(image_url, headers=headers, timeout=45)
+
+        if img_res.status_code == 200:
+            send_photo(chat_id, img_res.content, caption=f"🖼 تصویر ساخته شده با {model_display_name}:\n{prompt}")
+        else:
+            send_message(chat_id, f"❌ خطا در ساخت تصویر (کد: {img_res.status_code}). لطفاً مجدداً تلاش کنید.")
+    except Exception as e:
+        print(f"Image Generation Error ({model_type}): {e}", flush=True)
+        send_message(chat_id, f"❌ خطا در ارتباط با سرور تصویرساز: {e}")
 
 # ۴. پردازش پس‌زمینه پیام‌ها
 def process_update_async(data):
@@ -183,9 +206,10 @@ def process_update_async(data):
             "سلام! به ربات هوش مصنوعی خوش آمدید 🤖✨\n\n"
             "امکانات ربات:\n"
             "1️⃣ چت متنی با Gemini (سوال خود را بنویسید)\n"
-            "2️⃣ ساخت عکس با Flux (مثال: عکس: یک ماشین اسپرت)\n"
-            "3️⃣ تحلیل عکس (عکس بفرستید و سوال بپرسید)\n"
-            "4️⃣ وضعیت اشتراک با دستور /vip"
+            "2️⃣ ساخت عکس با مدل Flux (مثال: عکس فلاکس: یک ماشین اسپرت)\n"
+            "3️⃣ ساخت عکس با مدل Gemini (مثال: عکس جمنای: یک منظره سرسبز)\n"
+            "4️⃣ تحلیل عکس (عکس بفرستید و سوال بپرسید)\n"
+            "5️⃣ وضعیت اشتراک با دستور /vip"
         )
         send_message(chat_id, welcome_msg)
         return
@@ -220,24 +244,22 @@ def process_update_async(data):
             send_message(chat_id, "شما دسترسی مدیریتی ندارید.")
         return
 
-    # ساخت عکس با Pollinations (Flux)
-    if text.lower().startswith("عکس:") or text.lower().startswith("image:"):
+    # ساخت عکس با مدل Flux
+    if text.lower().startswith("عکس فلاکس:") or text.lower().startswith("فلاکس:"):
         prompt = text.split(":", 1)[1].strip()
-        if not prompt:
-            send_message(chat_id, "لطفاً بعد از 'عکس:' توصیف تصویر را بنویسید.")
-            return
+        generate_and_send_image(chat_id, prompt, model_type="flux")
+        return
 
-        send_message(chat_id, "🎨 در حال ساخت تصویر با Flux... کمی صبر کنید.")
-        try:
-            image_url = f"https://image.pollinations.ai/prompt/{requests.utils.quote(prompt)}?model=flux&width=1024&height=1024"
-            img_res = requests.get(image_url, timeout=40)
-            if img_res.status_code == 200:
-                send_photo(chat_id, img_res.content, caption=f"🖼 تصویر ساخته شده برای: {prompt}")
-            else:
-                send_message(chat_id, f"خطا در ساخت تصویر (کد: {img_res.status_code})")
-        except Exception as e:
-            print(f"Flux Error: {e}", flush=True)
-            send_message(chat_id, f"خطا در ارتباط با سرور تصویرساز: {e}")
+    # ساخت عکس با مدل Gemini / Imagen
+    elif text.lower().startswith("عکس جمنای:") or text.lower().startswith("جمنای عکس:") or text.lower().startswith("جمنای:"):
+        prompt = text.split(":", 1)[1].strip()
+        generate_and_send_image(chat_id, prompt, model_type="imagen")
+        return
+
+    # پیش‌فرض ساخت عکس (Flux)
+    elif text.lower().startswith("عکس:") or text.lower().startswith("image:"):
+        prompt = text.split(":", 1)[1].strip()
+        generate_and_send_image(chat_id, prompt, model_type="flux")
         return
 
     # تحلیل تصویر (Vision)
@@ -292,7 +314,7 @@ def webhook():
         if len(PROCESSED_UPDATES) > MAX_CACHE_SIZE:
             PROCESSED_UPDATES.clear()
 
-    # ارجاع پردازش به یک Thread مجزا تا وب‌هوک سریعاً پاسخ 200 بدهد
+    # ارجاع پردازش به یک Thread مجزا
     threading.Thread(target=process_update_async, args=(data,)).start()
 
     return jsonify({"status": "ok"}), 200
