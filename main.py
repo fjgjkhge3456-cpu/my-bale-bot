@@ -15,42 +15,49 @@ BALE_TOKEN = os.environ.get("BALE_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 ADMIN_ID = os.environ.get("ADMIN_ID")
 
-# دستورالعمل سیستم برای لحن صمیمی و روان
 SYSTEM_INSTRUCTION = (
     "تو یک دستیار هوش مصنوعی صمیمی، هوشمند و فارسی‌زبان هستی. "
     "پاسخ‌هایت باید بسیار روان، کوتاه، جذاب و همراه با ایموجی باشد. "
     "مستقیماً پاسخ بده و از تکرار جملات، آوردن لیست قوانین، یا تکرار سوال کاربر خودداری کن."
 )
 
-# تنظیمات اولیه گوگل جمنای
 if GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
         print("--- Gemini API configured successfully ---", flush=True)
     except Exception as e:
         print(f"!!! Error configuring Gemini API: {e} !!!", flush=True)
-else:
-    print("!!! WARNING: GEMINI_API_KEY is missing !!!", flush=True)
 
 BALE_API_URL = f"https://tapi.bale.ai/bot{BALE_TOKEN}" if BALE_TOKEN else ""
 
-# تابع فراخوانی هوش مصنوعی با جدیدترین مدل‌های فعال
+# تابع هوشمند دریافت پاسخ با تشخیص خودکار مدل‌های فعال
 def generate_gemini_response(contents):
     if not GEMINI_API_KEY:
         return "❌ کلید GEMINI_API_KEY در تنظیمات Render وارد نشده است."
 
-    # مدل‌های بروز و سریع
-    candidate_models = [
-        'gemini-2.0-flash',
-        'gemini-2.5-flash',
-        'gemini-1.5-flash',
-        'gemini-2.0-flash-lite'
-    ]
-    
+    # دریافت خودکار لیست مدل‌های فعال از گوگل
+    active_models = []
+    try:
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                clean_name = m.name.replace('models/', '')
+                active_models.append(clean_name)
+    except Exception as e:
+        print(f"Could not list models dynamically: {e}", flush=True)
+
+    # مدل‌های پیش‌فرض در صورت عدم دریافت لیست
+    if not active_models:
+        active_models = ['gemini-1.5-flash', 'gemini-2.5-flash', 'gemini-1.5-pro']
+
+    # اولویت‌دهی به مدل‌های سریع Flash
+    flash_models = [m for m in active_models if 'flash' in m.lower()]
+    other_models = [m for m in active_models if 'flash' not in m.lower()]
+    ordered_models = flash_models + other_models
+
     last_error = None
-    for m_name in candidate_models:
+    for m_name in ordered_models:
         try:
-            print(f"Trying model: {m_name}", flush=True)
+            print(f"Trying active model: {m_name}", flush=True)
             model = genai.GenerativeModel(m_name)
             
             if isinstance(contents, str):
