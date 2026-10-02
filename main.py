@@ -5,6 +5,7 @@ import requests
 import threading
 import urllib.parse
 import re
+import base64
 from flask import Flask, request, jsonify
 import google.generativeai as genai
 from PIL import Image
@@ -24,8 +25,6 @@ PROCESSED_UPDATES = set()
 MAX_CACHE_SIZE = 2000
 
 SYSTEM_INSTRUCTION = "پاسخ را فقط و فقط به زبان فارسی، روان و صمیمی بنویس."
-
-CACHED_MODELS = ['gemini-1.5-flash', 'gemini-1.5-pro']
 
 if GEMINI_API_KEY:
     try:
@@ -55,31 +54,66 @@ def clean_bot_response(text):
         filtered_lines.append(line)
     return '\n'.join(filtered_lines).strip()
 
-# بازنویسی مستقیم و دقیق پرامپت توسط جمنای
-def enhance_prompt_with_gemini(prompt, style_mode="auto"):
+# ترجمه متن فارسی به پرامپت دقیق انگلیسی جهت ارسال به Imagen 3
+def translate_to_english_prompt(prompt, style_mode="auto"):
     cleaned_prompt = clean_persian_colloquial(prompt)
     if not GEMINI_API_KEY:
         return cleaned_prompt
     try:
         model = genai.GenerativeModel('gemini-1.5-flash')
         
+        style_desc = "photorealistic high quality photo" if style_mode == "realistic" else "fantasy digital art" if style_mode == "fantasy" else "high quality image"
+        
         system_prompt = (
-            f"You are a direct translator for an AI image generator. "
-            f"Translate the following Persian request into a very simple, direct, high-quality English image prompt. "
-            f"Focus strictly on the main subject and characters mentioned. Do not add background scenery unless requested.\n"
-            f"User Request: {cleaned_prompt}\n"
-            f"Style: {'Photorealistic, high detail photography' if style_mode == 'realistic' else 'Vibrant digital art style' if style_mode == 'fantasy' else 'High quality photo'}\n"
-            f"Return ONLY the plain English prompt text."
+            f"Translate this Persian prompt to a simple, clear English prompt for image generation ({style_desc}). "
+            f"Persian text: '{cleaned_prompt}'\n"
+            f"Return ONLY the direct English translation without explanations or quotes."
         )
         
         response = model.generate_content(system_prompt)
         if response and response.text:
-            enhanced = response.text.strip().replace('"', '')
-            print(f"Direct Prompt Translation: '{prompt}' -> '{enhanced}'", flush=True)
-            return enhanced
+            return response.text.strip().replace('"', '')
     except Exception as e:
-        print(f"Prompt Enhancement Error: {e}", flush=True)
+        print(f"Translation Error: {e}", flush=True)
     return cleaned_prompt
+
+# ساخت عکس مستقیم با مدل رسمی گوگل (Imagen 3)
+def generate_image_with_google_imagen(english_prompt):
+    if not GEMINI_API_KEY:
+        return None, "کلید GEMINI_API_KEY تنظیم نشده است."
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-002:generateImages?key={GEMINI_API_KEY}"
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "prompt": english_prompt,
+        "config": {
+            "numberOfImages": 1,
+            "outputMimeType": "image/jpeg",
+            "aspectRatio": "1:1"
+        }
+    }
+
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=60)
+        if response.status_code == 200:
+            data = response.json()
+            if "generatedImages" in data and len(data["generatedImages"]) > 0:
+                img_b64 = data["generatedImages"][0]["image"]["imageBytes"]
+                img_bytes = base64.b64decode(img_b64)
+                return img_bytes, None
+            else:
+                return None, "گوگل عکسی تولید نکرد."
+        else:
+            err_text = response.text
+            print(f"Google Imagen API Error ({response.status_code}): {err_text}", flush=True)
+            if response.status_code == 429:
+                return None, "سقف درخواست‌های مجانی روزانه گوگل (Quota) پر شده است. لطفاً بعداً تلاش کنید."
+            elif response.status_code == 400:
+                return None, "درخواست شما توسط قوانین محتوایی و ایمنی گوگل مسدود شد."
+            return None, f"خطای سرور گوگل (کد {response.status_code})"
+    except Exception as e:
+        print(f"Imagen Request Exception: {e}", flush=True)
+        return None, f"خطا در ارتباط با سرور تصویرساز گوگل: {e}"
 
 # پاسخ متنی جمنای
 def generate_gemini_response(contents):
@@ -158,21 +192,20 @@ def send_photo(chat_id, photo_bytes, caption=""):
     except Exception as e:
         print(f"Error sending photo to Bale: {e}", flush=True)
 
-def generate_and_send_image(chat_id, english_prompt, caption_text):
-    try:
-        encoded_prompt = urllib.parse.quote(english_prompt)
-        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?model=flux&width=1024&height=1024&nologo=true&seed=42"
-        
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-        img_res = requests.get(image_url, headers=headers, timeout=45)
-
-        if img_res.status_code == 200:
-            send_photo(chat_id, img_res.content, caption=caption_text)
-        else:
-            send_message(chat_id, f"❌ خطا در ساخت تصویر (کد: {img_res.status_code}).")
-    except Exception as e:
-        print(f"Image Generation Error: {e}", flush=True)
-        send_message(chat_id, f"❌ خطا در سرور تصویرساز: {e}")
+# پردازش ساخت و ارسال عکس مستقیم گوگل
+def handle_image_request(chat_id, user_prompt, style_mode="auto"):
+    send_message(chat_id, "🎨 Google Imagen 3 در حال ساخت تصویر مستقیم است...")
+    
+    # ۱. ترجمه توسط جمنای
+    english_prompt = translate_to_english_prompt(user_prompt, style_mode)
+    
+    # ۲. ارسال مستقیم به موتور Imagen 3 گوگل
+    photo_bytes, error_msg = generate_image_with_google_imagen(english_prompt)
+    
+    if photo_bytes:
+        send_photo(chat_id, photo_bytes, caption=f"✨ ساخته شده مستقیماً توسط Google Imagen 3:\n{user_prompt}")
+    else:
+        send_message(chat_id, f"❌ ساخت تصویر ناموفق بود:\n{error_msg}")
 
 # پردازش پیام‌ها
 def process_update_async(data):
@@ -186,11 +219,11 @@ def process_update_async(data):
 
     if text == "/start":
         welcome_msg = (
-            "سلام! به ربات هوش مصنوعی خوش آمدید 🤖✨\n\n"
-            "دستورات ساخت عکس:\n"
-            "📸 `عکس واقعی: نیمار پیش هالند`\n"
-            "🎨 `عکس فانتزی: بتمن در تهران`\n"
-            "🖼 `عکس: ماشین اسپرت`"
+            "سلام! به ربات تصویرساز مستقیم گوگل خوش آمدید 🤖✨\n\n"
+            "تصاویر مستقیماً توسط مدل Imagen 3 گوگل ساخته می‌شوند:\n"
+            "📸 `عکس واقعی: نیمار و مسی`\n"
+            "🎨 `عکس فانتزی: ماشین اسپرت در تهران`\n"
+            "🖼 `عکس: یک کلبه جنگلی در برف`"
         )
         send_message(chat_id, welcome_msg)
         return
@@ -203,23 +236,17 @@ def process_update_async(data):
     lower_text = text.lower()
     if lower_text.startswith("عکس واقعی:") or lower_text.startswith("واقعی:"):
         prompt = text.split(":", 1)[1].strip()
-        send_message(chat_id, "📸 Gemini در حال تنظیم دقیق تصویر...")
-        english_prompt = enhance_prompt_with_gemini(prompt, style_mode="realistic")
-        generate_and_send_image(chat_id, english_prompt, f"📸 تصویر واقعی ساخته شده برای:\n{prompt}")
+        handle_image_request(chat_id, prompt, style_mode="realistic")
         return
 
     elif lower_text.startswith("عکس فانتزی:") or lower_text.startswith("فانتزی:"):
         prompt = text.split(":", 1)[1].strip()
-        send_message(chat_id, "🎨 Gemini در حال ساخت مدل فانتزی...")
-        english_prompt = enhance_prompt_with_gemini(prompt, style_mode="fantasy")
-        generate_and_send_image(chat_id, english_prompt, f"🎨 تصویر فانتزی ساخته شده برای:\n{prompt}")
+        handle_image_request(chat_id, prompt, style_mode="fantasy")
         return
 
     elif lower_text.startswith("عکس:") or lower_text.startswith("عکس جمنای:") or lower_text.startswith("جمنای:"):
         prompt = text.split(":", 1)[1].strip() if ":" in text else text
-        send_message(chat_id, "🤖 Gemini در حال پردازش تصویر...")
-        english_prompt = enhance_prompt_with_gemini(prompt, style_mode="auto")
-        generate_and_send_image(chat_id, english_prompt, f"🖼 تصویر ساخته شده برای:\n{prompt}")
+        handle_image_request(chat_id, prompt, style_mode="auto")
         return
 
     if text:
