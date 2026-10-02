@@ -34,20 +34,25 @@ else:
 
 BALE_API_URL = f"https://tapi.bale.ai/bot{BALE_TOKEN}" if BALE_TOKEN else ""
 
-# تابع فوق‌العاده سریع، بدون هیچ فراخوانی اضافه یا کندی
+# تابع فراخوانی هوش مصنوعی با جدیدترین مدل‌های فعال
 def generate_gemini_response(contents):
     if not GEMINI_API_KEY:
         return "❌ کلید GEMINI_API_KEY در تنظیمات Render وارد نشده است."
 
-    candidate_models = ['gemini-1.5-flash', 'gemini-1.5-pro']
+    # مدل‌های بروز و سریع
+    candidate_models = [
+        'gemini-2.0-flash',
+        'gemini-2.5-flash',
+        'gemini-1.5-flash',
+        'gemini-2.0-flash-lite'
+    ]
     
     last_error = None
     for m_name in candidate_models:
         try:
-            print(f"Calling model: {m_name}", flush=True)
+            print(f"Trying model: {m_name}", flush=True)
             model = genai.GenerativeModel(m_name)
             
-            # اگر ورودی متن باشد، دستور سیستم مستقیم در متن ترکیب می‌شود تا هیچ کندی رخ ندهد
             if isinstance(contents, str):
                 full_prompt = f"{SYSTEM_INSTRUCTION}\n\nپیام کاربر: {contents}"
                 response = model.generate_content(full_prompt)
