@@ -63,7 +63,24 @@ def clean_bot_response(text):
     result = '\n'.join(filtered_lines).strip()
     return result if result else text.strip()
 
-# تابع هوشمند دریافت پاسخ جمنای
+# تابع ترجمه پرامپت فارسی به انگلیسی برای دقت بالای تصویرسازی
+def translate_prompt_to_english(prompt):
+    if not GEMINI_API_KEY:
+        return prompt
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = model.generate_content(
+            f"Translate the following image prompt into highly descriptive English for AI image generation. Return ONLY the English text without quotes or explanation: {prompt}"
+        )
+        if response and response.text:
+            translated = response.text.strip()
+            print(f"Prompt translation: '{prompt}' -> '{translated}'", flush=True)
+            return translated
+    except Exception as e:
+        print(f"Translation error: {e}", flush=True)
+    return prompt
+
+# تابع هوشمند دریافت پاسخ متنی جمنای
 def generate_gemini_response(contents):
     if not GEMINI_API_KEY:
         return "❌ کلید GEMINI_API_KEY در تنظیمات Render وارد نشده است."
@@ -166,24 +183,27 @@ def get_bale_file_bytes(file_id):
         print(f"Error downloading file: {e}", flush=True)
     return None
 
-# تابع اختصاصی تولید و ارسال عکس (پشتیبانی از چند مدل)
+# تابع ساخت و ارسال عکس با ترجمه هوشمند پرامپت
 def generate_and_send_image(chat_id, prompt, model_type="flux"):
     if not prompt:
         send_message(chat_id, "لطفاً بعد از دستور، توصیف تصویر را بنویسید.")
         return
 
     model_display_name = "فلاکس (Flux)" if model_type == "flux" else "جمنای/ایمجین (Imagen)"
-    send_message(chat_id, f"🎨 در حال ساخت تصویر با مدل {model_display_name}... لطفاً کمی صبر کنید.")
+    send_message(chat_id, f"🎨 در حال ترجمه و پردازش تصویر با {model_display_name}... لطفاً کمی صبر کنید.")
+
+    # ۱. ترجمه خودکار متن فارسی به انگلیسی جهت افزایش فوق‌العاده دقت عکس
+    english_prompt = translate_prompt_to_english(prompt)
 
     try:
-        encoded_prompt = urllib.parse.quote(prompt)
+        encoded_prompt = urllib.parse.quote(english_prompt)
         image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?model={model_type}&width=1024&height=1024&nologo=true"
         
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         img_res = requests.get(image_url, headers=headers, timeout=45)
 
         if img_res.status_code == 200:
-            send_photo(chat_id, img_res.content, caption=f"🖼 تصویر ساخته شده با {model_display_name}:\n{prompt}")
+            send_photo(chat_id, img_res.content, caption=f"🖼 تصویر ساخته شده با {model_display_name}:\nدرخواست: {prompt}")
         else:
             send_message(chat_id, f"❌ خطا در ساخت تصویر (کد: {img_res.status_code}). لطفاً مجدداً تلاش کنید.")
     except Exception as e:
@@ -207,7 +227,7 @@ def process_update_async(data):
             "امکانات ربات:\n"
             "1️⃣ چت متنی با Gemini (سوال خود را بنویسید)\n"
             "2️⃣ ساخت عکس با مدل Flux (مثال: عکس فلاکس: یک ماشین اسپرت)\n"
-            "3️⃣ ساخت عکس با مدل Gemini (مثال: عکس جمنای: یک منظره سرسبز)\n"
+            "3️⃣ ساخت عکس با مدل Gemini (مثال: عکس جمنای: یک ماشین بی ام و)\n"
             "4️⃣ تحلیل عکس (عکس بفرستید و سوال بپرسید)\n"
             "5️⃣ وضعیت اشتراک با دستور /vip"
         )
@@ -253,7 +273,7 @@ def process_update_async(data):
     # ساخت عکس با مدل Gemini / Imagen
     elif text.lower().startswith("عکس جمنای:") or text.lower().startswith("جمنای عکس:") or text.lower().startswith("جمنای:"):
         prompt = text.split(":", 1)[1].strip()
-        generate_and_send_image(chat_id, prompt, model_type="imagen")
+        generate_and_send_image(chat_id, prompt, model_type="turbo")
         return
 
     # پیش‌فرض ساخت عکس (Flux)
