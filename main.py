@@ -23,7 +23,7 @@ BALE_API_URL = f"https://tapi.bale.ai/bot{BALE_TOKEN}" if BALE_TOKEN else ""
 PROCESSED_UPDATES = set()
 MAX_CACHE_SIZE = 2000
 
-# دستورالعمل سیستم کوتاه و مستقیم
+# دستورالعمل سیستم
 SYSTEM_INSTRUCTION = "پاسخ را فقط و فقط به زبان فارسی، روان و صمیمی بنویس."
 
 # کش کردن مدل‌های جمنای
@@ -48,7 +48,7 @@ if GEMINI_API_KEY:
     except Exception as e:
         print(f"!!! Error configuring Gemini API: {e} !!!", flush=True)
 
-# پاکسازی هوشمند پاسخ‌های جمنای از متون تحلیلی
+# پاکسازی هوشمند پاسخ‌های متنی جمنای
 def clean_bot_response(text):
     if not text:
         return ""
@@ -63,24 +63,44 @@ def clean_bot_response(text):
     result = '\n'.join(filtered_lines).strip()
     return result if result else text.strip()
 
-# تابع ترجمه پرامپت فارسی به انگلیسی برای دقت بالای تصویرسازی
-def translate_prompt_to_english(prompt):
+# بازنویسی و تقویت پرامپت ساخت عکس توسط جمنای به انگلیسی دقیق
+def enhance_prompt_with_gemini(prompt):
     if not GEMINI_API_KEY:
         return prompt
     try:
         model = genai.GenerativeModel('gemini-1.5-flash')
         response = model.generate_content(
-            f"Translate the following image prompt into highly descriptive English for AI image generation. Return ONLY the English text without quotes or explanation: {prompt}"
+            f"You are an expert image generation prompt engineer. Convert this user request into a highly realistic, detailed English image generation prompt. Return ONLY the English prompt without quotes or extra text.\nUser Request: {prompt}"
         )
         if response and response.text:
-            translated = response.text.strip()
-            print(f"Prompt translation: '{prompt}' -> '{translated}'", flush=True)
-            return translated
+            enhanced = response.text.strip().replace('"', '')
+            print(f"Enhanced Prompt: '{prompt}' -> '{enhanced}'", flush=True)
+            return enhanced
     except Exception as e:
-        print(f"Translation error: {e}", flush=True)
+        print(f"Prompt Enhancement Error: {e}", flush=True)
     return prompt
 
-# تابع هوشمند دریافت پاسخ متنی جمنای
+# بازنویسی پرامپت برای ویرایش عکس بر اساس تصویر ارسالی کاربر
+def generate_edit_prompt_with_gemini(image, user_instruction):
+    if not GEMINI_API_KEY:
+        return user_instruction
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        query = (
+            f"Analyze this image and the user's editing request: '{user_instruction}'. "
+            "Write a detailed English prompt describing the modified scene so an AI image generator can reconstruct it with the requested edits. "
+            "Return ONLY the detailed English prompt without explanation or quotes."
+        )
+        response = model.generate_content([query, image])
+        if response and response.text:
+            enhanced = response.text.strip().replace('"', '')
+            print(f"Image Edit Prompt: '{user_instruction}' -> '{enhanced}'", flush=True)
+            return enhanced
+    except Exception as e:
+        print(f"Image Edit Prompt Error: {e}", flush=True)
+    return user_instruction
+
+# تابع دریافت پاسخ متنی جمنای
 def generate_gemini_response(contents):
     if not GEMINI_API_KEY:
         return "❌ کلید GEMINI_API_KEY در تنظیمات Render وارد نشده است."
@@ -105,7 +125,7 @@ def generate_gemini_response(contents):
 
     return f"⚠️ خطا در دریافت پاسخ از مدل‌ها: {last_error}"
 
-# ۲. پایگاه داده SQLite برای اشتراک VIP
+# ۲. پایگاه داده SQLite
 DB_NAME = "users.db"
 
 def init_db():
@@ -150,7 +170,7 @@ def add_vip_user(user_id, days):
     conn.close()
     return expire_date
 
-# ۳. توابع ارتباط با API پیام‌رسان بله
+# ۳. توابع ارتباط با API بله
 def send_message(chat_id, text):
     if not BALE_API_URL:
         return
@@ -183,31 +203,21 @@ def get_bale_file_bytes(file_id):
         print(f"Error downloading file: {e}", flush=True)
     return None
 
-# تابع ساخت و ارسال عکس با ترجمه هوشمند پرامپت
-def generate_and_send_image(chat_id, prompt, model_type="flux"):
-    if not prompt:
-        send_message(chat_id, "لطفاً بعد از دستور، توصیف تصویر را بنویسید.")
-        return
-
-    model_display_name = "فلاکس (Flux)" if model_type == "flux" else "جمنای/ایمجین (Imagen)"
-    send_message(chat_id, f"🎨 در حال ترجمه و پردازش تصویر با {model_display_name}... لطفاً کمی صبر کنید.")
-
-    # ۱. ترجمه خودکار متن فارسی به انگلیسی جهت افزایش فوق‌العاده دقت عکس
-    english_prompt = translate_prompt_to_english(prompt)
-
+# تابع ساخت و ارسال عکس
+def generate_and_send_image(chat_id, english_prompt, caption_text):
     try:
         encoded_prompt = urllib.parse.quote(english_prompt)
-        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?model={model_type}&width=1024&height=1024&nologo=true"
+        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?model=flux&width=1024&height=1024&nologo=true"
         
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         img_res = requests.get(image_url, headers=headers, timeout=45)
 
         if img_res.status_code == 200:
-            send_photo(chat_id, img_res.content, caption=f"🖼 تصویر ساخته شده با {model_display_name}:\nدرخواست: {prompt}")
+            send_photo(chat_id, img_res.content, caption=caption_text)
         else:
             send_message(chat_id, f"❌ خطا در ساخت تصویر (کد: {img_res.status_code}). لطفاً مجدداً تلاش کنید.")
     except Exception as e:
-        print(f"Image Generation Error ({model_type}): {e}", flush=True)
+        print(f"Image Generation Error: {e}", flush=True)
         send_message(chat_id, f"❌ خطا در ارتباط با سرور تصویرساز: {e}")
 
 # ۴. پردازش پس‌زمینه پیام‌ها
@@ -226,8 +236,8 @@ def process_update_async(data):
             "سلام! به ربات هوش مصنوعی خوش آمدید 🤖✨\n\n"
             "امکانات ربات:\n"
             "1️⃣ چت متنی با Gemini (سوال خود را بنویسید)\n"
-            "2️⃣ ساخت عکس با مدل Flux (مثال: عکس فلاکس: یک ماشین اسپرت)\n"
-            "3️⃣ ساخت عکس با مدل Gemini (مثال: عکس جمنای: یک ماشین بی ام و)\n"
+            "2️⃣ ساخت عکس هوشمند (مثال: عکس: رونالدو در حال بازی)\n"
+            "3️⃣ ویرایش عکس (عکس بفرستید و در متن بنویسید: ویرایش: موهاشو قرمز کن)\n"
             "4️⃣ تحلیل عکس (عکس بفرستید و سوال بپرسید)\n"
             "5️⃣ وضعیت اشتراک با دستور /vip"
         )
@@ -264,43 +274,51 @@ def process_update_async(data):
             send_message(chat_id, "شما دسترسی مدیریتی ندارید.")
         return
 
-    # ساخت عکس با مدل Flux
-    if text.lower().startswith("عکس فلاکس:") or text.lower().startswith("فلاکس:"):
+    # ساخت تصویر جدید با تقویت پرامپت توسط Gemini
+    if text.lower().startswith("عکس:") or text.lower().startswith("عکس جمنای:") or text.lower().startswith("عکس فلاکس:") or text.lower().startswith("image:"):
         prompt = text.split(":", 1)[1].strip()
-        generate_and_send_image(chat_id, prompt, model_type="flux")
+        if not prompt:
+            send_message(chat_id, "لطفاً بعد از دستور، توصیف تصویر را بنویسید.")
+            return
+
+        send_message(chat_id, "🎨 Gemini در حال ساخت پرامپت تخصصی و پردازش تصویر است...")
+        english_prompt = enhance_prompt_with_gemini(prompt)
+        generate_and_send_image(chat_id, english_prompt, f"🖼 تصویر ساخته شده برای:\n{prompt}")
         return
 
-    # ساخت عکس با مدل Gemini / Imagen
-    elif text.lower().startswith("عکس جمنای:") or text.lower().startswith("جمنای عکس:") or text.lower().startswith("جمنای:"):
-        prompt = text.split(":", 1)[1].strip()
-        generate_and_send_image(chat_id, prompt, model_type="turbo")
-        return
-
-    # پیش‌فرض ساخت عکس (Flux)
-    elif text.lower().startswith("عکس:") or text.lower().startswith("image:"):
-        prompt = text.split(":", 1)[1].strip()
-        generate_and_send_image(chat_id, prompt, model_type="flux")
-        return
-
-    # تحلیل تصویر (Vision)
+    # دریافت و تحلیل یا ویرایش تصویر ارسالی
     if "photo" in message:
         photos = message["photo"]
         file_id = photos[-1]["file_id"]
-        caption = message.get("caption", "این عکس را به دقت تحلیل و توصیف کن.")
+        caption = message.get("caption", "").strip()
 
-        send_message(chat_id, "🔍 در حال تحلیل تصویر با Gemini...")
-        try:
-            photo_bytes = get_bale_file_bytes(file_id)
-            if photo_bytes:
-                image = Image.open(io.BytesIO(photo_bytes))
-                answer = generate_gemini_response([caption, image])
+        photo_bytes = get_bale_file_bytes(file_id)
+        if not photo_bytes:
+            send_message(chat_id, "خطا در دریافت فایل تصویر از بله.")
+            return
+
+        image = Image.open(io.BytesIO(photo_bytes))
+
+        # اگر کاربر در توضیحات عکس کلمه «ویرایش» یا «ادیت» آورده باشد
+        if caption.lower().startswith("ویرایش:") or caption.lower().startswith("ادیت:"):
+            edit_instruction = caption.split(":", 1)[1].strip()
+            send_message(chat_id, "🎨 Gemini در حال تحلیل تصویر و اعمال ویرایش درخواست‌شده است...")
+            
+            english_edit_prompt = generate_edit_prompt_with_gemini(image, edit_instruction)
+            generate_and_send_image(chat_id, english_edit_prompt, f"✏️ تصویر ویرایش شده با دستور:\n{edit_instruction}")
+            return
+
+        # در غیر این صورت، عکس را تحلیل و توصیف می‌کند
+        else:
+            query_caption = caption if caption else "این عکس را به دقت تحلیل و توصیف کن."
+            send_message(chat_id, "🔍 در حال تحلیل تصویر با Gemini...")
+            try:
+                answer = generate_gemini_response([query_caption, image])
                 send_message(chat_id, answer)
-            else:
-                send_message(chat_id, "خطا در دریافت فایل تصویر از بله.")
-        except Exception as e:
-            print(f"Gemini Vision Error: {e}", flush=True)
-            send_message(chat_id, f"خطا در تحلیل تصویر:\n{e}")
-        return
+            except Exception as e:
+                print(f"Gemini Vision Error: {e}", flush=True)
+                send_message(chat_id, f"خطا در تحلیل تصویر:\n{e}")
+            return
 
     # چت متنی با Gemini
     if text:
