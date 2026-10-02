@@ -20,43 +20,29 @@ ADMIN_ID = os.environ.get("ADMIN_ID")
 
 BALE_API_URL = f"https://tapi.bale.ai/bot{BALE_TOKEN}" if BALE_TOKEN else ""
 
-# حافظه موقت برای جلوگیری از پیام‌های تکراری
 PROCESSED_UPDATES = set()
 MAX_CACHE_SIZE = 2000
 
-# دستورالعمل سیستم
 SYSTEM_INSTRUCTION = "پاسخ را فقط و فقط به زبان فارسی، روان و صمیمی بنویس."
 
-# کش کردن مدل‌های جمنای
 CACHED_MODELS = ['gemini-1.5-flash', 'gemini-1.5-pro']
 
 if GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
         print("--- Gemini API configured successfully ---", flush=True)
-        try:
-            fetched_models = []
-            for m in genai.list_models():
-                if 'generateContent' in m.supported_generation_methods:
-                    clean_name = m.name.replace('models/', '')
-                    if clean_name not in fetched_models:
-                        fetched_models.append(clean_name)
-            if fetched_models:
-                CACHED_MODELS = fetched_models
-            print(f"Loaded models on startup: {CACHED_MODELS}", flush=True)
-        except Exception as e:
-            print(f"Could not fetch list_models on startup: {e}", flush=True)
     except Exception as e:
         print(f"!!! Error configuring Gemini API: {e} !!!", flush=True)
 
-# پاکسازی متون عامیانه فارسی
+# پاکسازی متون اضافی
 def clean_persian_colloquial(prompt):
-    words_to_remove = ['بزن', 'بیار', 'برام بیار', 'بکش', 'درست کن', 'ساز', 'بفرست', 'لطفا', 'عکس']
-    pattern = r'\b(' + '|'.join(words_to_remove) + r')\b'
-    cleaned = re.sub(pattern, '', prompt).strip()
-    return cleaned if cleaned else prompt
+    words_to_remove = ['عکس واقعی:', 'عکس فانتزی:', 'عکس جمنای:', 'عکس:', 'بزن', 'بیار', 'برام بیار', 'بکش', 'درست کن', 'بفرست']
+    cleaned = prompt
+    for w in words_to_remove:
+        cleaned = cleaned.replace(w, '')
+    return cleaned.strip()
 
-# پاکسازی هوشمند پاسخ‌های متنی جمنای
+# پاکسازی پاسخ‌های متنی
 def clean_bot_response(text):
     if not text:
         return ""
@@ -64,14 +50,12 @@ def clean_bot_response(text):
     filtered_lines = []
     for line in lines:
         l = line.strip().lower()
-        if any(keyword in l for keyword in ['user input', 'constraint', 'persona', 'final response', 'option 1', 'meaning:', 'check against']):
+        if any(keyword in l for keyword in ['user input', 'constraint', 'persona', 'final response']):
             continue
         filtered_lines.append(line)
-    
-    result = '\n'.join(filtered_lines).strip()
-    return result if result else text.strip()
+    return '\n'.join(filtered_lines).strip()
 
-# ساخت پرامپت دقیق توسط جمنای بر اساس سبک (واقعی یا فانتزی)
+# بازنویسی مستقیم و دقیق پرامپت توسط جمنای
 def enhance_prompt_with_gemini(prompt, style_mode="auto"):
     cleaned_prompt = clean_persian_colloquial(prompt)
     if not GEMINI_API_KEY:
@@ -79,77 +63,38 @@ def enhance_prompt_with_gemini(prompt, style_mode="auto"):
     try:
         model = genai.GenerativeModel('gemini-1.5-flash')
         
-        style_instruction = ""
-        if style_mode == "realistic":
-            style_instruction = "Make it an ultra-realistic, high-resolution 8k photograph with natural lighting."
-        elif style_mode == "fantasy":
-            style_instruction = "Make it a creative, vibrant fantasy digital artwork, 3D style or artistic illustration."
-        else:
-            style_instruction = "Create a detailed English prompt capture the exact meaning realistically or creatively as best fits."
-
         system_prompt = (
-            f"You are an expert image prompt generator. Convert this Persian user request into a detailed English image generation prompt.\n"
-            f"User Request: '{cleaned_prompt}'\n"
-            f"Style Guide: {style_instruction}\n"
-            f"Return ONLY the detailed English prompt without quotes or conversational filler."
+            f"You are a direct translator for an AI image generator. "
+            f"Translate the following Persian request into a very simple, direct, high-quality English image prompt. "
+            f"Focus strictly on the main subject and characters mentioned. Do not add background scenery unless requested.\n"
+            f"User Request: {cleaned_prompt}\n"
+            f"Style: {'Photorealistic, high detail photography' if style_mode == 'realistic' else 'Vibrant digital art style' if style_mode == 'fantasy' else 'High quality photo'}\n"
+            f"Return ONLY the plain English prompt text."
         )
         
         response = model.generate_content(system_prompt)
         if response and response.text:
             enhanced = response.text.strip().replace('"', '')
-            print(f"Enhanced Prompt ({style_mode}): '{prompt}' -> '{enhanced}'", flush=True)
+            print(f"Direct Prompt Translation: '{prompt}' -> '{enhanced}'", flush=True)
             return enhanced
     except Exception as e:
         print(f"Prompt Enhancement Error: {e}", flush=True)
     return cleaned_prompt
 
-# ساخت پرامپت برای ویرایش عکس
-def generate_edit_prompt_with_gemini(image, user_instruction):
-    cleaned_instruction = clean_persian_colloquial(user_instruction)
-    if not GEMINI_API_KEY:
-        return cleaned_instruction
-    try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        query = (
-            f"Analyze this image and the user's editing request: '{cleaned_instruction}'. "
-            "Write a detailed English prompt describing the modified scene so an AI image generator can reconstruct it with the requested edits. "
-            "Return ONLY the detailed English prompt without explanation or quotes."
-        )
-        response = model.generate_content([query, image])
-        if response and response.text:
-            enhanced = response.text.strip().replace('"', '')
-            print(f"Image Edit Prompt: '{user_instruction}' -> '{enhanced}'", flush=True)
-            return enhanced
-    except Exception as e:
-        print(f"Image Edit Prompt Error: {e}", flush=True)
-    return cleaned_instruction
-
-# تابع دریافت پاسخ متنی جمنای
+# پاسخ متنی جمنای
 def generate_gemini_response(contents):
     if not GEMINI_API_KEY:
-        return "❌ کلید GEMINI_API_KEY در تنظیمات Render وارد نشده است."
+        return "❌ کلید GEMINI_API_KEY تنظیم نشده است."
 
-    last_error = None
-    for model_name in CACHED_MODELS:
-        try:
-            clean_name = model_name.replace('models/', '')
-            model = genai.GenerativeModel(
-                model_name=clean_name,
-                system_instruction=SYSTEM_INSTRUCTION
-            )
-            response = model.generate_content(contents)
-            
-            if response and hasattr(response, 'text') and response.text:
-                cleaned_text = clean_bot_response(response.text)
-                return cleaned_text
-        except Exception as e:
-            last_error = e
-            print(f"Model {model_name} failed: {e}", flush=True)
-            continue
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash', system_instruction=SYSTEM_INSTRUCTION)
+        response = model.generate_content(contents)
+        if response and hasattr(response, 'text') and response.text:
+            return clean_bot_response(response.text)
+    except Exception as e:
+        return f"⚠️ خطا در دریافت پاسخ: {e}"
 
-    return f"⚠️ خطا در دریافت پاسخ از مدل‌ها: {last_error}"
-
-# ۲. پایگاه داده SQLite
+# پایگاه داده
 DB_NAME = "users.db"
 
 def init_db():
@@ -176,7 +121,6 @@ def is_vip(user_id):
         cursor.execute("SELECT expire_date FROM vip_users WHERE user_id = ?", (user_id,))
         result = cursor.fetchone()
         conn.close()
-
         if result:
             expire_date = datetime.strptime(result[0], "%Y-%m-%d %H:%M:%S")
             if expire_date > datetime.now():
@@ -194,7 +138,7 @@ def add_vip_user(user_id, days):
     conn.close()
     return expire_date
 
-# ۳. توابع ارتباط با API بله
+# توابع بله
 def send_message(chat_id, text):
     if not BALE_API_URL:
         return
@@ -214,24 +158,10 @@ def send_photo(chat_id, photo_bytes, caption=""):
     except Exception as e:
         print(f"Error sending photo to Bale: {e}", flush=True)
 
-def get_bale_file_bytes(file_id):
-    try:
-        res = requests.get(f"{BALE_API_URL}/getFile?file_id={file_id}", timeout=10)
-        file_info = res.json()
-        if file_info.get("ok"):
-            file_path = file_info["result"]["file_path"]
-            file_url = f"https://tapi.bale.ai/file/bot{BALE_TOKEN}/{file_path}"
-            img_res = requests.get(file_url, timeout=20)
-            return img_res.content
-    except Exception as e:
-        print(f"Error downloading file: {e}", flush=True)
-    return None
-
-# تابع ساخت و ارسال عکس با موتور مطمئن Flux
 def generate_and_send_image(chat_id, english_prompt, caption_text):
     try:
         encoded_prompt = urllib.parse.quote(english_prompt)
-        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?model=flux&width=1024&height=1024&nologo=true"
+        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?model=flux&width=1024&height=1024&nologo=true&seed=42"
         
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         img_res = requests.get(image_url, headers=headers, timeout=45)
@@ -239,12 +169,12 @@ def generate_and_send_image(chat_id, english_prompt, caption_text):
         if img_res.status_code == 200:
             send_photo(chat_id, img_res.content, caption=caption_text)
         else:
-            send_message(chat_id, f"❌ خطا در ساخت تصویر (کد: {img_res.status_code}). لطفاً مجدداً تلاش کنید.")
+            send_message(chat_id, f"❌ خطا در ساخت تصویر (کد: {img_res.status_code}).")
     except Exception as e:
         print(f"Image Generation Error: {e}", flush=True)
-        send_message(chat_id, f"❌ خطا در ارتباط با سرور تصویرساز: {e}")
+        send_message(chat_id, f"❌ خطا در سرور تصویرساز: {e}")
 
-# ۴. پردازش پس‌زمینه پیام‌ها
+# پردازش پیام‌ها
 def process_update_async(data):
     if not data or "message" not in data:
         return
@@ -254,145 +184,67 @@ def process_update_async(data):
     user_id = message["from"]["id"]
     text = message.get("text", "").strip()
 
-    # دستور /start
     if text == "/start":
         welcome_msg = (
             "سلام! به ربات هوش مصنوعی خوش آمدید 🤖✨\n\n"
-            "راهنمای ساخت عکس با Gemini:\n"
-            "📸 **عکس واقعی:** `عکس واقعی: رونالدو پیش مسی`\n"
-            "🎨 **عکس فانتزی:** `عکس فانتزی: رونالدو پیش مسی`\n"
-            "🤖 **تشخیص خودکار:** `عکس جمنای: ماشین اسپرت`\n\n"
-            "امکانات دیگر:\n"
-            "🔹 چت متنی با Gemini (ارسال سوال متنی)\n"
-            "🔹 ویرایش عکس (ارسال عکس با متن: `ویرایش: موهاشو قرمز کن`)\n"
-            "🔹 تحلیل عکس (ارسال عکس و پرسیدن سوال)\n"
-            "🔹 وضعیت اشتراک: /vip"
+            "دستورات ساخت عکس:\n"
+            "📸 `عکس واقعی: نیمار پیش هالند`\n"
+            "🎨 `عکس فانتزی: بتمن در تهران`\n"
+            "🖼 `عکس: ماشین اسپرت`"
         )
         send_message(chat_id, welcome_msg)
         return
 
-    # دستور /vip
     elif text == "/vip":
         vip_status = "فعال ✅" if is_vip(user_id) else "غیرفعال ❌"
-        vip_msg = (
-            f"اطلاعات حساب VIP شما:\n"
-            f"آیدی عددی شما: {user_id}\n"
-            f"وضعیت اشتراک: {vip_status}\n\n"
-            f"💳 جهت خرید اشتراک VIP:\n"
-            f"مبلغ: ۵۰,۰۰۰ تومان\n"
-            f"شماره کارت: 6037-9999-9999-9999 (به نام مدیر)\n\n"
-            f"پس از واریز، فیش را برای پشتیبانی بفرستید."
-        )
-        send_message(chat_id, vip_msg)
+        send_message(chat_id, f"وضعیت VIP شما: {vip_status}")
         return
 
-    # دستور ارتقا به VIP توسط مدیر
-    elif text.startswith("/addvip"):
-        if str(user_id) == str(ADMIN_ID):
-            try:
-                parts = text.split()
-                target_user_id = int(parts[1])
-                days = int(parts[2])
-                exp_date = add_vip_user(target_user_id, days)
-                send_message(chat_id, f"✅ کاربر {target_user_id} به مدت {days} روز VIP شد.\nانقضا: {exp_date}")
-            except Exception as e:
-                send_message(chat_id, "فرمت اشتباه است! مثال صحیح:\n/addvip 123456789 30")
-        else:
-            send_message(chat_id, "شما دسترسی مدیریتی ندارید.")
-        return
-
-    # ۱. پردازش درخواست ساخت عکس
     lower_text = text.lower()
     if lower_text.startswith("عکس واقعی:") or lower_text.startswith("واقعی:"):
         prompt = text.split(":", 1)[1].strip()
-        send_message(chat_id, "📸 Gemini در حال طراحی پرامپت واقع‌گرایانه (Photorealistic) است...")
+        send_message(chat_id, "📸 Gemini در حال تنظیم دقیق تصویر...")
         english_prompt = enhance_prompt_with_gemini(prompt, style_mode="realistic")
         generate_and_send_image(chat_id, english_prompt, f"📸 تصویر واقعی ساخته شده برای:\n{prompt}")
         return
 
     elif lower_text.startswith("عکس فانتزی:") or lower_text.startswith("فانتزی:"):
         prompt = text.split(":", 1)[1].strip()
-        send_message(chat_id, "🎨 Gemini در حال طراحی پرامپت فانتزی و هنری است...")
+        send_message(chat_id, "🎨 Gemini در حال ساخت مدل فانتزی...")
         english_prompt = enhance_prompt_with_gemini(prompt, style_mode="fantasy")
         generate_and_send_image(chat_id, english_prompt, f"🎨 تصویر فانتزی ساخته شده برای:\n{prompt}")
         return
 
-    elif lower_text.startswith("عکس:") or lower_text.startswith("عکس جمنای:") or lower_text.startswith("جمنای:") or lower_text.startswith("image:"):
+    elif lower_text.startswith("عکس:") or lower_text.startswith("عکس جمنای:") or lower_text.startswith("جمنای:"):
         prompt = text.split(":", 1)[1].strip() if ":" in text else text
-        send_message(chat_id, "🤖 Gemini در حال پردازش و طراحی پرامپت است...")
+        send_message(chat_id, "🤖 Gemini در حال پردازش تصویر...")
         english_prompt = enhance_prompt_with_gemini(prompt, style_mode="auto")
         generate_and_send_image(chat_id, english_prompt, f"🖼 تصویر ساخته شده برای:\n{prompt}")
         return
 
-    # ۲. دریافت و تحلیل یا ویرایش تصویر ارسالی
-    if "photo" in message:
-        photos = message["photo"]
-        file_id = photos[-1]["file_id"]
-        caption = message.get("caption", "").strip()
-
-        photo_bytes = get_bale_file_bytes(file_id)
-        if not photo_bytes:
-            send_message(chat_id, "خطا در دریافت فایل تصویر از بله.")
-            return
-
-        image = Image.open(io.BytesIO(photo_bytes))
-
-        # ویرایش عکس
-        if caption.lower().startswith("ویرایش:") or caption.lower().startswith("ادیت:"):
-            edit_instruction = caption.split(":", 1)[1].strip()
-            send_message(chat_id, "🎨 Gemini در حال تحلیل تصویر و اعمال ویرایش درخواست‌شده است...")
-            
-            english_edit_prompt = generate_edit_prompt_with_gemini(image, edit_instruction)
-            generate_and_send_image(chat_id, english_edit_prompt, f"✏️ تصویر ویرایش شده با دستور:\n{edit_instruction}")
-            return
-
-        # تحلیل عکس
-        else:
-            query_caption = caption if caption else "این عکس را به دقت تحلیل و توصیف کن."
-            send_message(chat_id, "🔍 در حال تحلیل تصویر با Gemini...")
-            try:
-                answer = generate_gemini_response([query_caption, image])
-                send_message(chat_id, answer)
-            except Exception as e:
-                print(f"Gemini Vision Error: {e}", flush=True)
-                send_message(chat_id, f"خطا در تحلیل تصویر:\n{e}")
-            return
-
-    # ۳. چت متنی با Gemini
     if text:
         send_message(chat_id, "🤔 در حال تفکر...")
-        try:
-            answer = generate_gemini_response(text)
-            send_message(chat_id, answer)
-        except Exception as e:
-            print(f"!!! CRITICAL GEMINI ERROR: {e} !!!", flush=True)
-            send_message(chat_id, f"متأسفانه مشکلی پیش آمد:\n{e}")
+        answer = generate_gemini_response(text)
+        send_message(chat_id, answer)
 
-# ۵. دریافت درخواست از وب‌هوک
 @app.route('/', methods=['POST', 'GET'])
 def webhook():
     if request.method == 'GET':
         return "Server is Live!", 200
 
     data = request.get_json()
-
     if not data:
         return jsonify({"status": "ok"}), 200
 
-    # جلوگیری از پردازش درخواست‌های تکراری
     update_id = data.get("update_id")
     if update_id:
         if update_id in PROCESSED_UPDATES:
-            print(f"Skipping duplicate update_id: {update_id}", flush=True)
             return jsonify({"status": "already processed"}), 200
-        
         PROCESSED_UPDATES.add(update_id)
         if len(PROCESSED_UPDATES) > MAX_CACHE_SIZE:
             PROCESSED_UPDATES.clear()
 
-    # ارجاع پردازش به یک Thread مجزا
     threading.Thread(target=process_update_async, args=(data,)).start()
-
     return jsonify({"status": "ok"}), 200
 
 if __name__ == '__main__':
