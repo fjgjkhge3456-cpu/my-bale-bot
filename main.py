@@ -32,7 +32,14 @@ BALE_API_URL = f"https://tapi.bale.ai/bot{BALE_TOKEN}" if BALE_TOKEN else ""
 PROCESSED_UPDATES = set()
 MAX_CACHE_SIZE = 2000
 
-# تابع هوشمند: لیست مدل‌ها (کاملاً بدون تغییر طبق کد اولیه شما)
+# دستورالعمل سیستم جهت هدایت جمنای به پاسخ‌دهی مستقیم و فارسی
+SYSTEM_INSTRUCTION = (
+    "تو یک دستیار هوش مصنوعی صمیمی، هوشمند و فارسی‌زبان هستی. "
+    "همیشه فقط پاسخ نهایی و مستقیم را به زبان فارسی، روان و صمیمی بنویس. "
+    "از آوردن فرآیند تفکر، ترجمه انگلیسی، تحلیل متن کاربر، یا ارائه گزینه‌های متعدد (Option 1/Option 2) جداً خودداری کن."
+)
+
+# تابع هوشمند دریافت پاسخ جمنای
 def generate_gemini_response(contents):
     if not GEMINI_API_KEY:
         return "❌ کلید GEMINI_API_KEY در تنظیمات Render وارد نشده است."
@@ -56,7 +63,12 @@ def generate_gemini_response(contents):
         try:
             clean_name = model_name.replace('models/', '')
             print(f"Trying model: {clean_name}", flush=True)
-            model = genai.GenerativeModel(clean_name)
+            
+            # تنظیم مدل با system_instruction
+            model = genai.GenerativeModel(
+                model_name=clean_name,
+                system_instruction=SYSTEM_INSTRUCTION
+            )
             response = model.generate_content(contents)
             
             if response and hasattr(response, 'text') and response.text:
@@ -149,7 +161,7 @@ def get_bale_file_bytes(file_id):
         print(f"Error downloading file: {e}", flush=True)
     return None
 
-# ۴. پردازش پس‌زمینه پیام‌ها برای عدم تاخیر پاسخ وب‌هوک
+# ۴. پردازش پس‌زمینه پیام‌ها (اجرا در Thread جداگانه)
 def process_update_async(data):
     if not data or "message" not in data:
         return
@@ -264,7 +276,7 @@ def webhook():
     if not data:
         return jsonify({"status": "ok"}), 200
 
-    # بررسی update_id برای جلوگیری از پردازش درخواست‌های تکراری ارسال شده توسط بله
+    # جلوگیری از پردازش درخواست‌های تکراری بله
     update_id = data.get("update_id")
     if update_id:
         if update_id in PROCESSED_UPDATES:
@@ -275,7 +287,7 @@ def webhook():
         if len(PROCESSED_UPDATES) > MAX_CACHE_SIZE:
             PROCESSED_UPDATES.clear()
 
-    # اجرای پردازش پیام در Thread مجزا و ارسال فوری پاسخ OK به وب‌هوک بله
+    # ارجاع پردازش به یک Thread مجزا تا وب‌هوک سریعاً پاسخ 200 دهد
     threading.Thread(target=process_update_async, args=(data,)).start()
 
     return jsonify({"status": "ok"}), 200
