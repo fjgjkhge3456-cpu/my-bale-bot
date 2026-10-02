@@ -2,6 +2,7 @@ import os
 import json
 import sqlite3
 import requests
+import threading
 from flask import Flask, request, jsonify
 import google.generativeai as genai
 from PIL import Image
@@ -27,7 +28,11 @@ else:
 
 BALE_API_URL = f"https://tapi.bale.ai/bot{BALE_TOKEN}" if BALE_TOKEN else ""
 
-# تابع هوشمند: لیست مدل‌ها را می‌گیرد و پیشوند اضافی models/ را پاک می‌کند
+# حافظه موقت برای جلوگیری از پردازش پیام‌های تکراری
+PROCESSED_UPDATES = set()
+MAX_CACHE_SIZE = 2000
+
+# تابع هوشمند: لیست مدل‌ها (کاملاً بدون تغییر طبق کد اولیه شما)
 def generate_gemini_response(contents):
     if not GEMINI_API_KEY:
         return "❌ کلید GEMINI_API_KEY در تنظیمات Render وارد نشده است."
@@ -144,17 +149,10 @@ def get_bale_file_bytes(file_id):
         print(f"Error downloading file: {e}", flush=True)
     return None
 
-# ۴. پردازش پیام‌های دریافتی از وب‌هوک
-@app.route('/', methods=['POST', 'GET'])
-def webhook():
-    if request.method == 'GET':
-        return "Server is Live!", 200
-
-    data = request.get_json()
-    print(f"Incoming Update: {json.dumps(data, ensure_ascii=False)}", flush=True)
-
+# ۴. پردازش پس‌زمینه پیام‌ها برای عدم تاخیر پاسخ وب‌هوک
+def process_update_async(data):
     if not data or "message" not in data:
-        return jsonify({"status": "ok"}), 200
+        return
 
     message = data["message"]
     chat_id = message["chat"]["id"]
@@ -172,7 +170,7 @@ def webhook():
             "4️⃣ وضعیت اشتراک با دستور /vip"
         )
         send_message(chat_id, welcome_msg)
-        return jsonify({"status": "ok"}), 200
+        return
 
     # دستور /vip
     elif text == "/vip":
@@ -187,7 +185,7 @@ def webhook():
             f"پس از واریز، فیش را برای پشتیبانی بفرستید."
         )
         send_message(chat_id, vip_msg)
-        return jsonify({"status": "ok"}), 200
+        return
 
     # دستور ارتقا به VIP توسط مدیر
     elif text.startswith("/addvip"):
@@ -202,14 +200,14 @@ def webhook():
                 send_message(chat_id, "فرمت اشتباه است! مثال صحیح:\n/addvip 123456789 30")
         else:
             send_message(chat_id, "شما دسترسی مدیریتی ندارید.")
-        return jsonify({"status": "ok"}), 200
+        return
 
     # ساخت عکس با Pollinations (Flux)
     if text.lower().startswith("عکس:") or text.lower().startswith("image:"):
         prompt = text.split(":", 1)[1].strip()
         if not prompt:
             send_message(chat_id, "لطفاً بعد از 'عکس:' توصیف تصویر را بنویسید.")
-            return jsonify({"status": "ok"}), 200
+            return
 
         send_message(chat_id, "🎨 در حال ساخت تصویر با Flux... کمی صبر کنید.")
         try:
@@ -222,7 +220,7 @@ def webhook():
         except Exception as e:
             print(f"Flux Error: {e}", flush=True)
             send_message(chat_id, f"خطا در ارتباط با سرور تصویرساز: {e}")
-        return jsonify({"status": "ok"}), 200
+        return
 
     # تحلیل تصویر (Vision)
     if "photo" in message:
@@ -242,7 +240,7 @@ def webhook():
         except Exception as e:
             print(f"Gemini Vision Error: {e}", flush=True)
             send_message(chat_id, f"خطا در تحلیل تصویر:\n{e}")
-        return jsonify({"status": "ok"}), 200
+        return
 
     # چت متنی با Gemini
     if text:
@@ -253,6 +251,32 @@ def webhook():
         except Exception as e:
             print(f"!!! CRITICAL GEMINI ERROR: {e} !!!", flush=True)
             send_message(chat_id, f"متأسفانه مشکلی پیش آمد:\n{e}")
+
+# ۵. دریافت درخواست از وب‌هوک
+@app.route('/', methods=['POST', 'GET'])
+def webhook():
+    if request.method == 'GET':
+        return "Server is Live!", 200
+
+    data = request.get_json()
+    print(f"Incoming Update: {json.dumps(data, ensure_ascii=False)}", flush=True)
+
+    if not data:
+        return jsonify({"status": "ok"}), 200
+
+    # بررسی update_id برای جلوگیری از پردازش درخواست‌های تکراری ارسال شده توسط بله
+    update_id = data.get("update_id")
+    if update_id:
+        if update_id in PROCESSED_UPDATES:
+            print(f"Skipping duplicate update_id: {update_id}", flush=True)
+            return jsonify({"status": "already processed"}), 200
+        
+        PROCESSED_UPDATES.add(update_id)
+        if len(PROCESSED_UPDATES) > MAX_CACHE_SIZE:
+            PROCESSED_UPDATES.clear()
+
+    # اجرای پردازش پیام در Thread مجزا و ارسال فوری پاسخ OK به وب‌هوک بله
+    threading.Thread(target=process_update_async, args=(data,)).start()
 
     return jsonify({"status": "ok"}), 200
 
