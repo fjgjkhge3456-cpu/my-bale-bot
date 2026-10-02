@@ -30,50 +30,28 @@ if GEMINI_API_KEY:
 
 BALE_API_URL = f"https://tapi.bale.ai/bot{BALE_TOKEN}" if BALE_TOKEN else ""
 
-# تابع هوشمند دریافت پاسخ با تشخیص خودکار مدل‌های فعال
+# تابع چت مستقیم و فوق‌العاده سریع بدون چک کردن لیست مدل‌ها
 def generate_gemini_response(contents):
     if not GEMINI_API_KEY:
         return "❌ کلید GEMINI_API_KEY در تنظیمات Render وارد نشده است."
 
-    # دریافت خودکار لیست مدل‌های فعال از گوگل
-    active_models = []
+    # استفاده مستقیم از سریع‌ترین مدل
     try:
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                clean_name = m.name.replace('models/', '')
-                active_models.append(clean_name)
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        
+        if isinstance(contents, str):
+            full_prompt = f"{SYSTEM_INSTRUCTION}\n\nپیام کاربر: {contents}"
+            response = model.generate_content(full_prompt)
+        else:
+            response = model.generate_content(contents)
+        
+        if response and hasattr(response, 'text') and response.text:
+            return response.text.strip()
     except Exception as e:
-        print(f"Could not list models dynamically: {e}", flush=True)
+        print(f"Gemini error: {e}", flush=True)
+        return f"⚠️ خطایی در پاسخ‌دهی رخ داد: {e}"
 
-    # مدل‌های پیش‌فرض در صورت عدم دریافت لیست
-    if not active_models:
-        active_models = ['gemini-1.5-flash', 'gemini-2.5-flash', 'gemini-1.5-pro']
-
-    # اولویت‌دهی به مدل‌های سریع Flash
-    flash_models = [m for m in active_models if 'flash' in m.lower()]
-    other_models = [m for m in active_models if 'flash' not in m.lower()]
-    ordered_models = flash_models + other_models
-
-    last_error = None
-    for m_name in ordered_models:
-        try:
-            print(f"Trying active model: {m_name}", flush=True)
-            model = genai.GenerativeModel(m_name)
-            
-            if isinstance(contents, str):
-                full_prompt = f"{SYSTEM_INSTRUCTION}\n\nپیام کاربر: {contents}"
-                response = model.generate_content(full_prompt)
-            else:
-                response = model.generate_content(contents)
-            
-            if response and hasattr(response, 'text') and response.text:
-                return response.text.strip()
-        except Exception as e:
-            last_error = e
-            print(f"Model {m_name} failed: {e}", flush=True)
-            continue
-
-    raise Exception(f"پاسخی از گوگل دریافت نشد: {last_error}")
+    return "⚠️ پاسخی دریافت نشد."
 
 # ۲. پایگاه داده SQLite برای اشتراک VIP
 DB_NAME = "users.db"
