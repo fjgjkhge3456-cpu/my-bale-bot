@@ -4,6 +4,7 @@ import sqlite3
 import requests
 import threading
 import urllib.parse
+import re
 from flask import Flask, request, jsonify
 import google.generativeai as genai
 from PIL import Image
@@ -48,6 +49,13 @@ if GEMINI_API_KEY:
     except Exception as e:
         print(f"!!! Error configuring Gemini API: {e} !!!", flush=True)
 
+# پاکسازی متون عامیانه فارسی مثل "بزن"، "بیار" و...
+def clean_persian_colloquial(prompt):
+    words_to_remove = ['بزن', 'بیار', 'برام بیار', 'بکش', 'درست کن', 'ساز', 'بفرست', 'لطفا']
+    pattern = r'\b(' + '|'.join(words_to_remove) + r')\b'
+    cleaned = re.sub(pattern, '', prompt).strip()
+    return cleaned if cleaned else prompt
+
 # پاکسازی هوشمند پاسخ‌های متنی جمنای
 def clean_bot_response(text):
     if not text:
@@ -65,12 +73,13 @@ def clean_bot_response(text):
 
 # بازنویسی و تقویت پرامپت ساخت عکس توسط جمنای به انگلیسی دقیق
 def enhance_prompt_with_gemini(prompt):
+    cleaned_prompt = clean_persian_colloquial(prompt)
     if not GEMINI_API_KEY:
-        return prompt
+        return cleaned_prompt
     try:
         model = genai.GenerativeModel('gemini-1.5-flash')
         response = model.generate_content(
-            f"You are an expert image generation prompt engineer. Convert this user request into a highly realistic, detailed English image generation prompt. Return ONLY the English prompt without quotes or extra text.\nUser Request: {prompt}"
+            f"Convert this image request into a concise, highly realistic, professional English image generation prompt. Ignore conversational Persian words. Return ONLY the English prompt text.\nRequest: {cleaned_prompt}"
         )
         if response and response.text:
             enhanced = response.text.strip().replace('"', '')
@@ -78,16 +87,17 @@ def enhance_prompt_with_gemini(prompt):
             return enhanced
     except Exception as e:
         print(f"Prompt Enhancement Error: {e}", flush=True)
-    return prompt
+    return cleaned_prompt
 
-# بازنویسی پرامپت برای ویرایش عکس بر اساس تصویر ارسالی کاربر
+# بازنویسی پرامپت برای ویرایش عکس
 def generate_edit_prompt_with_gemini(image, user_instruction):
+    cleaned_instruction = clean_persian_colloquial(user_instruction)
     if not GEMINI_API_KEY:
-        return user_instruction
+        return cleaned_instruction
     try:
         model = genai.GenerativeModel('gemini-1.5-flash')
         query = (
-            f"Analyze this image and the user's editing request: '{user_instruction}'. "
+            f"Analyze this image and the user's editing request: '{cleaned_instruction}'. "
             "Write a detailed English prompt describing the modified scene so an AI image generator can reconstruct it with the requested edits. "
             "Return ONLY the detailed English prompt without explanation or quotes."
         )
@@ -98,7 +108,7 @@ def generate_edit_prompt_with_gemini(image, user_instruction):
             return enhanced
     except Exception as e:
         print(f"Image Edit Prompt Error: {e}", flush=True)
-    return user_instruction
+    return cleaned_instruction
 
 # تابع دریافت پاسخ متنی جمنای
 def generate_gemini_response(contents):
@@ -204,10 +214,10 @@ def get_bale_file_bytes(file_id):
     return None
 
 # تابع ساخت و ارسال عکس
-def generate_and_send_image(chat_id, english_prompt, caption_text):
+def generate_and_send_image(chat_id, english_prompt, caption_text, model_type="flux"):
     try:
         encoded_prompt = urllib.parse.quote(english_prompt)
-        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?model=flux&width=1024&height=1024&nologo=true"
+        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?model={model_type}&width=1024&height=1024&nologo=true"
         
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         img_res = requests.get(image_url, headers=headers, timeout=45)
@@ -236,10 +246,11 @@ def process_update_async(data):
             "سلام! به ربات هوش مصنوعی خوش آمدید 🤖✨\n\n"
             "امکانات ربات:\n"
             "1️⃣ چت متنی با Gemini (سوال خود را بنویسید)\n"
-            "2️⃣ ساخت عکس هوشمند (مثال: عکس: رونالدو در حال بازی)\n"
-            "3️⃣ ویرایش عکس (عکس بفرستید و در متن بنویسید: ویرایش: موهاشو قرمز کن)\n"
-            "4️⃣ تحلیل عکس (عکس بفرستید و سوال بپرسید)\n"
-            "5️⃣ وضعیت اشتراک با دستور /vip"
+            "2️⃣ ساخت عکس واقعی با فلاکس (مثال: عکس فلاکس: ماشین بی ام و)\n"
+            "3️⃣ ساخت عکس فانتزی با جمنای (مثال: عکس جمنای: ماشین بی ام و)\n"
+            "4️⃣ ویرایش عکس (عکس بفرستید و بنویسید: ویرایش: رنگشو قرمز کن)\n"
+            "5️⃣ تحلیل عکس (عکس بفرستید و سوال بپرسید)\n"
+            "6️⃣ وضعیت اشتراک با دستور /vip"
         )
         send_message(chat_id, welcome_msg)
         return
@@ -274,16 +285,20 @@ def process_update_async(data):
             send_message(chat_id, "شما دسترسی مدیریتی ندارید.")
         return
 
-    # ساخت تصویر جدید با تقویت پرامپت توسط Gemini
-    if text.lower().startswith("عکس:") or text.lower().startswith("عکس جمنای:") or text.lower().startswith("عکس فلاکس:") or text.lower().startswith("image:"):
+    # ۱. ساخت تصویر با مدل جمنای (Turbo)
+    if text.lower().startswith("عکس جمنای:") or text.lower().startswith("جمنای:"):
         prompt = text.split(":", 1)[1].strip()
-        if not prompt:
-            send_message(chat_id, "لطفاً بعد از دستور، توصیف تصویر را بنویسید.")
-            return
-
-        send_message(chat_id, "🎨 Gemini در حال ساخت پرامپت تخصصی و پردازش تصویر است...")
+        send_message(chat_id, "🎨 در حال ساخت تصویر با مدل Gemini...")
         english_prompt = enhance_prompt_with_gemini(prompt)
-        generate_and_send_image(chat_id, english_prompt, f"🖼 تصویر ساخته شده برای:\n{prompt}")
+        generate_and_send_image(chat_id, english_prompt, f"🖼 تصویر ساخته شده با Gemini:\n{prompt}", model_type="turbo")
+        return
+
+    # ۲. ساخت تصویر با مدل فلاکس (Flux)
+    elif text.lower().startswith("عکس فلاکس:") or text.lower().startswith("فلاکس:") or text.lower().startswith("عکس:") or text.lower().startswith("image:"):
+        prompt = text.split(":", 1)[1].strip() if ":" in text else text
+        send_message(chat_id, "🎨 در حال ساخت تصویر با مدل Flux...")
+        english_prompt = enhance_prompt_with_gemini(prompt)
+        generate_and_send_image(chat_id, english_prompt, f"🖼 تصویر ساخته شده با Flux:\n{prompt}", model_type="flux")
         return
 
     # دریافت و تحلیل یا ویرایش تصویر ارسالی
@@ -299,16 +314,16 @@ def process_update_async(data):
 
         image = Image.open(io.BytesIO(photo_bytes))
 
-        # اگر کاربر در توضیحات عکس کلمه «ویرایش» یا «ادیت» آورده باشد
+        # ویرایش عکس
         if caption.lower().startswith("ویرایش:") or caption.lower().startswith("ادیت:"):
             edit_instruction = caption.split(":", 1)[1].strip()
             send_message(chat_id, "🎨 Gemini در حال تحلیل تصویر و اعمال ویرایش درخواست‌شده است...")
             
             english_edit_prompt = generate_edit_prompt_with_gemini(image, edit_instruction)
-            generate_and_send_image(chat_id, english_edit_prompt, f"✏️ تصویر ویرایش شده با دستور:\n{edit_instruction}")
+            generate_and_send_image(chat_id, english_edit_prompt, f"✏️ تصویر ویرایش شده با دستور:\n{edit_instruction}", model_type="flux")
             return
 
-        # در غیر این صورت، عکس را تحلیل و توصیف می‌کند
+        # تحلیل عکس
         else:
             query_caption = caption if caption else "این عکس را به دقت تحلیل و توصیف کن."
             send_message(chat_id, "🔍 در حال تحلیل تصویر با Gemini...")
