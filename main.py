@@ -35,7 +35,11 @@ if GEMINI_API_KEY:
 
 # پاکسازی متون اضافی
 def clean_persian_colloquial(prompt):
-    words_to_remove = ['عکس واقعی:', 'عکس فانتزی:', 'عکس جمنای:', 'عکس:', 'بزن', 'بیار', 'برام بیار', 'بکش', 'درست کن', 'بفرست']
+    words_to_remove = [
+        'عکس واقعی:', 'عکس فانتزی:', 'عکس جمنای:', 'عکس فلوکس:', 
+        'واقعی:', 'فانتزی:', 'جمنای:', 'فلوکس:', 'عکس:', 
+        'بزن', 'بیار', 'برام بیار', 'بکش', 'درست کن', 'بفرست'
+    ]
     cleaned = prompt
     for w in words_to_remove:
         cleaned = cleaned.replace(w, '')
@@ -54,20 +58,28 @@ def clean_bot_response(text):
         filtered_lines.append(line)
     return '\n'.join(filtered_lines).strip()
 
-# ترجمه متن فارسی به پرامپت دقیق انگلیسی جهت ارسال به Imagen 3
-def translate_to_english_prompt(prompt, style_mode="auto"):
+# ترجمه و بهینه‌سازی پرامپت با جمنای
+def translate_and_enhance_prompt(prompt, style_mode="auto"):
     cleaned_prompt = clean_persian_colloquial(prompt)
     if not GEMINI_API_KEY:
         return cleaned_prompt
     try:
         model = genai.GenerativeModel('gemini-1.5-flash')
         
-        style_desc = "photorealistic high quality photo" if style_mode == "realistic" else "fantasy digital art" if style_mode == "fantasy" else "high quality image"
+        style_desc = (
+            "ultra-realistic high quality 8k photorealistic photography, sharp focus" 
+            if style_mode == "realistic" 
+            else "vibrant 3D digital art illustration, highly detailed fantasy style" 
+            if style_mode == "fantasy" 
+            else "high quality clear photo"
+        )
         
         system_prompt = (
-            f"Translate this Persian prompt to a simple, clear English prompt for image generation ({style_desc}). "
-            f"Persian text: '{cleaned_prompt}'\n"
-            f"Return ONLY the direct English translation without explanations or quotes."
+            f"You are an expert image generator prompt designer. "
+            f"Convert this Persian user request into a simple, precise English image prompt. "
+            f"Style requirements: {style_desc}.\n"
+            f"User request: '{cleaned_prompt}'\n"
+            f"Return ONLY the plain English prompt text without quotes or explanations."
         )
         
         response = model.generate_content(system_prompt)
@@ -77,43 +89,41 @@ def translate_to_english_prompt(prompt, style_mode="auto"):
         print(f"Translation Error: {e}", flush=True)
     return cleaned_prompt
 
-# ساخت عکس مستقیم با مدل رسمی گوگل (Imagen 3)
-def generate_image_with_google_imagen(english_prompt):
+# موتور شماره ۱: ساخت عکس با Flux
+def generate_image_flux(english_prompt):
+    try:
+        encoded_prompt = urllib.parse.quote(english_prompt)
+        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?model=flux&width=1024&height=1024&nologo=true"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        res = requests.get(image_url, headers=headers, timeout=45)
+        if res.status_code == 200:
+            return res.content, None
+        return None, f"خطای سرور فلوکس (کد {res.status_code})"
+    except Exception as e:
+        return None, f"خطا در ارتباط با فلوکس: {e}"
+
+# موتور شماره ۲: ساخت عکس با Google Imagen
+def generate_image_google_imagen(english_prompt):
     if not GEMINI_API_KEY:
-        return None, "کلید GEMINI_API_KEY تنظیم نشده است."
+        return None, "کلید API تنظیم نشده است."
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-002:generateImages?key={GEMINI_API_KEY}"
     headers = {"Content-Type": "application/json"}
     payload = {
         "prompt": english_prompt,
-        "config": {
-            "numberOfImages": 1,
-            "outputMimeType": "image/jpeg",
-            "aspectRatio": "1:1"
-        }
+        "config": {"numberOfImages": 1, "outputMimeType": "image/jpeg", "aspectRatio": "1:1"}
     }
 
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=60)
+        response = requests.post(url, headers=headers, json=payload, timeout=45)
         if response.status_code == 200:
             data = response.json()
             if "generatedImages" in data and len(data["generatedImages"]) > 0:
                 img_b64 = data["generatedImages"][0]["image"]["imageBytes"]
-                img_bytes = base64.b64decode(img_b64)
-                return img_bytes, None
-            else:
-                return None, "گوگل عکسی تولید نکرد."
-        else:
-            err_text = response.text
-            print(f"Google Imagen API Error ({response.status_code}): {err_text}", flush=True)
-            if response.status_code == 429:
-                return None, "سقف درخواست‌های مجانی روزانه گوگل (Quota) پر شده است. لطفاً بعداً تلاش کنید."
-            elif response.status_code == 400:
-                return None, "درخواست شما توسط قوانین محتوایی و ایمنی گوگل مسدود شد."
-            return None, f"خطای سرور گوگل (کد {response.status_code})"
+                return base64.b64decode(img_b64), None
+        return None, f"کد خطا: {response.status_code}"
     except Exception as e:
-        print(f"Imagen Request Exception: {e}", flush=True)
-        return None, f"خطا در ارتباط با سرور تصویرساز گوگل: {e}"
+        return None, str(e)
 
 # پاسخ متنی جمنای
 def generate_gemini_response(contents):
@@ -163,15 +173,6 @@ def is_vip(user_id):
         print(f"VIP check error: {e}", flush=True)
     return False
 
-def add_vip_user(user_id, days):
-    expire_date = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO vip_users (user_id, expire_date) VALUES (?, ?)", (user_id, expire_date))
-    conn.commit()
-    conn.close()
-    return expire_date
-
 # توابع بله
 def send_message(chat_id, text):
     if not BALE_API_URL:
@@ -192,20 +193,34 @@ def send_photo(chat_id, photo_bytes, caption=""):
     except Exception as e:
         print(f"Error sending photo to Bale: {e}", flush=True)
 
-# پردازش ساخت و ارسال عکس مستقیم گوگل
-def handle_image_request(chat_id, user_prompt, style_mode="auto"):
-    send_message(chat_id, "🎨 Google Imagen 3 در حال ساخت تصویر مستقیم است...")
-    
-    # ۱. ترجمه توسط جمنای
-    english_prompt = translate_to_english_prompt(user_prompt, style_mode)
-    
-    # ۲. ارسال مستقیم به موتور Imagen 3 گوگل
-    photo_bytes, error_msg = generate_image_with_google_imagen(english_prompt)
-    
+# پردازش هوشمند ساخت تصویر
+def process_image_command(chat_id, user_prompt, engine_choice="auto", style_mode="auto"):
+    english_prompt = translate_and_enhance_prompt(user_prompt, style_mode)
+
+    # اگر کاربر فلوکس را انتخاب کرده باشد
+    if engine_choice == "flux":
+        send_message(chat_id, "⚡ در حال ساخت تصویر با موتور Flux...")
+        photo_bytes, err = generate_image_flux(english_prompt)
+        if photo_bytes:
+            send_photo(chat_id, photo_bytes, caption=f"🎨 ساخته شده با موتور Flux:\n{user_prompt}")
+        else:
+            send_message(chat_id, f"❌ خطا در ساخت تصویر با فلوکس:\n{err}")
+        return
+
+    # اگر کاربر جمنای را انتخاب کرده یا حالت خودکار باشد
+    send_message(chat_id, "🤖 Gemini در حال پردازش و تولید تصویر...")
+    photo_bytes, err = generate_image_google_imagen(english_prompt)
+
+    # اگر سرویس گوگلی ۴۰۴ داد یا فعال نبود، به صورت خودکار با Flux ساخته می‌شود
     if photo_bytes:
-        send_photo(chat_id, photo_bytes, caption=f"✨ ساخته شده مستقیماً توسط Google Imagen 3:\n{user_prompt}")
+        send_photo(chat_id, photo_bytes, caption=f"✨ ساخته شده توسط Google Imagen:\n{user_prompt}")
     else:
-        send_message(chat_id, f"❌ ساخت تصویر ناموفق بود:\n{error_msg}")
+        print(f"Imagen failed ({err}), falling back to Flux...", flush=True)
+        photo_bytes, flux_err = generate_image_flux(english_prompt)
+        if photo_bytes:
+            send_photo(chat_id, photo_bytes, caption=f"🖼 تصویر ساخته شده برای شما:\n{user_prompt}")
+        else:
+            send_message(chat_id, f"❌ خطا در ساخت تصویر:\n{flux_err}")
 
 # پردازش پیام‌ها
 def process_update_async(data):
@@ -219,11 +234,12 @@ def process_update_async(data):
 
     if text == "/start":
         welcome_msg = (
-            "سلام! به ربات تصویرساز مستقیم گوگل خوش آمدید 🤖✨\n\n"
-            "تصاویر مستقیماً توسط مدل Imagen 3 گوگل ساخته می‌شوند:\n"
-            "📸 `عکس واقعی: نیمار و مسی`\n"
-            "🎨 `عکس فانتزی: ماشین اسپرت در تهران`\n"
-            "🖼 `عکس: یک کلبه جنگلی در برف`"
+            "سلام! به ربات تصویرساز هوشمند خوش آمدید 🤖✨\n\n"
+            "دستورات ساخت عکس:\n"
+            "⚡ **با موتور Flux:** `عکس فلوکس: نیمار پیش مسی`\n"
+            "🤖 **با جمنای / هوشمند:** `عکس جمنای: ماشین اسپرت`\n"
+            "📸 **عکس واقعی:** `عکس واقعی: برج میلاد در شب`\n"
+            "🎨 **عکس فانتزی:** `عکس فانتزی: بتمن در تهران`"
         )
         send_message(chat_id, welcome_msg)
         return
@@ -234,21 +250,38 @@ def process_update_async(data):
         return
 
     lower_text = text.lower()
-    if lower_text.startswith("عکس واقعی:") or lower_text.startswith("واقعی:"):
+
+    # ۱. درخواست صریح فلوکس
+    if lower_text.startswith("عکس فلوکس:") or lower_text.startswith("فلوکس:"):
         prompt = text.split(":", 1)[1].strip()
-        handle_image_request(chat_id, prompt, style_mode="realistic")
+        process_image_command(chat_id, prompt, engine_choice="flux", style_mode="auto")
         return
 
+    # ۲. درخواست صریح جمنای
+    elif lower_text.startswith("عکس جمنای:") or lower_text.startswith("جمنای:"):
+        prompt = text.split(":", 1)[1].strip()
+        process_image_command(chat_id, prompt, engine_choice="gemini", style_mode="auto")
+        return
+
+    # ۳. عکس واقعی
+    elif lower_text.startswith("عکس واقعی:") or lower_text.startswith("واقعی:"):
+        prompt = text.split(":", 1)[1].strip()
+        process_image_command(chat_id, prompt, engine_choice="auto", style_mode="realistic")
+        return
+
+    # ۴. عکس فانتزی
     elif lower_text.startswith("عکس فانتزی:") or lower_text.startswith("فانتزی:"):
         prompt = text.split(":", 1)[1].strip()
-        handle_image_request(chat_id, prompt, style_mode="fantasy")
+        process_image_command(chat_id, prompt, engine_choice="auto", style_mode="fantasy")
         return
 
-    elif lower_text.startswith("عکس:") or lower_text.startswith("عکس جمنای:") or lower_text.startswith("جمنای:"):
-        prompt = text.split(":", 1)[1].strip() if ":" in text else text
-        handle_image_request(chat_id, prompt, style_mode="auto")
+    # ۵. عکس عمومی
+    elif lower_text.startswith("عکس:"):
+        prompt = text.split(":", 1)[1].strip()
+        process_image_command(chat_id, prompt, engine_choice="auto", style_mode="auto")
         return
 
+    # چت متنی
     if text:
         send_message(chat_id, "🤔 در حال تفکر...")
         answer = generate_gemini_response(text)
