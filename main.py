@@ -28,6 +28,9 @@ MAX_CACHE_SIZE = 2000
 
 SYSTEM_INSTRUCTION = "پاسخ را فقط و فقط به زبان فارسی، روان و صمیمی بنویس."
 
+# کش کردن اسم مدل کاری برای جلوگیری از کندی چت
+CACHED_MODEL_NAME = None
+
 if GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
@@ -59,59 +62,59 @@ def clean_bot_response(text):
         filtered_lines.append(line)
     return '\n'.join(filtered_lines).strip()
 
-# سیستم هوشمند شناسایی و فراخوانی مدل‌های فعال اکانت شما
-def call_gemini_dynamic(contents, use_system_instruction=True):
+# دریافت نام مدل فعال به صورت سریع و کش‌شده
+def get_working_model():
+    global CACHED_MODEL_NAME
+    if CACHED_MODEL_NAME:
+        return CACHED_MODEL_NAME
+
+    # امتحان مدل‌های سریع به ترتیب اولویت
+    candidates = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash']
+    for model_name in candidates:
+        try:
+            m = genai.GenerativeModel(model_name)
+            res = m.generate_content("test")
+            if res:
+                CACHED_MODEL_NAME = model_name
+                return CACHED_MODEL_NAME
+        except Exception:
+            continue
+
+    # در صورت عدم موفقیت، جستجو در لیست مدل‌ها
+    try:
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                name = m.name.replace('models/', '')
+                CACHED_MODEL_NAME = name
+                return CACHED_MODEL_NAME
+    except Exception as e:
+        print(f"Error finding model: {e}", flush=True)
+
+    CACHED_MODEL_NAME = 'gemini-1.5-flash'
+    return CACHED_MODEL_NAME
+
+# فراخوانی سریع و مستقیم Gemini برای چت متنی
+def call_gemini_fast(contents, use_system_instruction=True):
     if not GEMINI_API_KEY:
         return None, "❌ کلید GEMINI_API_KEY تنظیم نشده است."
 
-    working_model_name = None
-    
-    # ۱. دریافت لیست مدل‌های فعال اکانت شما به‌صورت زنده
     try:
-        supported_models = []
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                supported_models.append(m.name)
-        
-        # اولویت‌بندی بهترین مدل‌های موجود در کلید شما
-        preferences = ['flash', 'pro', 'gemini']
-        for pref in preferences:
-            for m_name in supported_models:
-                if pref in m_name.lower():
-                    working_model_name = m_name
-                    break
-            if working_model_name:
-                break
-                
-        if not working_model_name and supported_models:
-            working_model_name = supported_models[0]
-            
+        model_name = get_working_model()
+        kwargs = {}
+        if use_system_instruction:
+            kwargs['system_instruction'] = SYSTEM_INSTRUCTION
+
+        model = genai.GenerativeModel(model_name, **kwargs)
+        response = model.generate_content(contents)
+
+        if response and hasattr(response, 'text') and response.text:
+            return clean_bot_response(response.text), None
+        return None, "⚠️ پاسخی دریافت نشد."
     except Exception as e:
-        print(f"List models error: {e}", flush=True)
-
-    # لیست اسامی رزرو در صورت عدم دریافت لیست
-    candidate_names = []
-    if working_model_name:
-        candidate_names.append(working_model_name)
-    candidate_names.extend(['gemini-1.5-flash', 'gemini-pro', 'models/gemini-1.5-flash', 'models/gemini-pro'])
-
-    last_err = ""
-    for model_id in candidate_names:
-        try:
-            kwargs = {}
-            if use_system_instruction:
-                kwargs['system_instruction'] = SYSTEM_INSTRUCTION
-            
-            model = genai.GenerativeModel(model_id, **kwargs)
-            response = model.generate_content(contents)
-            
-            if response and hasattr(response, 'text') and response.text:
-                return clean_bot_response(response.text), None
-        except Exception as e:
-            last_err = str(e)
-            continue
-
-    return None, f"⚠️ خطای برقراری ارتباط با Gemini:\n{last_err}"
+        # در صورت بروز خطا، کش بازنشانی می‌شود تا در درخواست بعدی مدل دیگری تست شود
+        global CACHED_MODEL_NAME
+        CACHED_MODEL_NAME = None
+        return None, f"⚠️ خطای ارتباط با Gemini:\n{str(e)}"
 
 # دانلود فایل از سرور بله
 def download_bale_file(file_id):
@@ -180,7 +183,7 @@ def translate_and_enhance_prompt(prompt, style_mode="auto"):
         f"Translate the following Persian text into a clear English image prompt: '{cleaned_prompt}'. "
         f"Style constraint: {style_desc}. Return ONLY plain English prompt text without quotes."
     )
-    translated, err = call_gemini_dynamic(system_prompt, use_system_instruction=False)
+    translated, err = call_gemini_fast(system_prompt, use_system_instruction=False)
     if translated:
         return translated.replace('"', '').strip()
     return cleaned_prompt
@@ -190,7 +193,7 @@ def analyze_image_with_gemini(photo_bytes, user_question=""):
     try:
         img = Image.open(io.BytesIO(photo_bytes))
         prompt = user_question if user_question else "این تصویر را به دقت تحلیل کن و توضیحات کاملی به فارسی ارائه بده."
-        text_res, err = call_gemini_dynamic([prompt, img], use_system_instruction=True)
+        text_res, err = call_gemini_fast([prompt, img], use_system_instruction=True)
         if text_res:
             return text_res
         return err
@@ -205,7 +208,7 @@ def edit_image_with_gemini(photo_bytes, edit_instruction):
             f"Analyze this input image carefully and describe it. Then incorporate the user's requested edit: '{edit_instruction}'. "
             f"Output ONLY a detailed English image generation prompt describing the updated final image."
         )
-        new_prompt, err = call_gemini_dynamic([prompt_prep, img], use_system_instruction=False)
+        new_prompt, err = call_gemini_fast([prompt_prep, img], use_system_instruction=False)
         if new_prompt:
             return generate_image_flux(new_prompt)
         return None, err
@@ -377,9 +380,9 @@ def process_update_async(data):
         process_image_command(chat_id, prompt, engine_choice="auto", style_mode="auto")
         return
 
-    # چت متنی مستقیم با Gemini
+    # چت متنی سریع و مستقیم با Gemini
     send_message(chat_id, "🤔 در حال تفکر...")
-    answer, err = call_gemini_dynamic(text, use_system_instruction=True)
+    answer, err = call_gemini_fast(text, use_system_instruction=True)
     if answer:
         send_message(chat_id, answer)
     else:
