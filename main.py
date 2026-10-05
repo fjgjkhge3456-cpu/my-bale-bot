@@ -26,13 +26,16 @@ BALE_FILE_URL = f"https://tapi.bale.ai/file/bot{BALE_TOKEN}" if BALE_TOKEN else 
 PROCESSED_UPDATES = set()
 MAX_CACHE_SIZE = 2000
 
+# تنظیم مدل اصلی رو gemini-3.0-flash
+PRIMARY_MODEL = 'gemini-3.0-flash'
+
 # دستور سیستم برای پاسخ‌دهی صمیمی و فارسی
 SYSTEM_INSTRUCTION = "پاسخ را فقط و فقط به زبان فارسی روان، صمیمی و با استفاده مناسب از ایموجی بنویس."
 
 if GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
-        print("--- Gemini API آماده است ---", flush=True)
+        print(f"--- Gemini API با مدل {PRIMARY_MODEL} آماده است ---", flush=True)
     except Exception as e:
         print(f"!!! خطا در تنظیم API جمنای: {e} !!!", flush=True)
 
@@ -60,12 +63,17 @@ def clean_bot_response(text):
         filtered_lines.append(line)
     return '\n'.join(filtered_lines).strip()
 
-# ارسال چت متنی
+# ارسال چت متنی هوشمند با gemini-3.0-flash
 def call_gemini_chat(text_prompt):
     if not GEMINI_API_KEY:
         return "❌ کلید API جمنای تنظیم نشده است."
     
-    models_to_try = ['gemini-1.5-flash', 'gemini-1.5-pro']
+    models_to_try = [
+        PRIMARY_MODEL,
+        f"models/{PRIMARY_MODEL}",
+        'gemini-1.5-flash',
+        'models/gemini-1.5-flash'
+    ]
     
     for model_name in models_to_try:
         try:
@@ -75,20 +83,32 @@ def call_gemini_chat(text_prompt):
                 return clean_bot_response(response.text)
         except Exception as e:
             print(f"Chat error on {model_name}: {e}", flush=True)
+            try:
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(f"{SYSTEM_INSTRUCTION}\n\n{text_prompt}")
+                if response and hasattr(response, 'text') and response.text:
+                    return clean_bot_response(response.text)
+            except Exception as inner_e:
+                print(f"Inner error on {model_name}: {inner_e}", flush=True)
             continue
             
-    return "⚠️ در حال حاضر مشکلی در پاسخگویی پیش آمده، لطفاً دوباره تلاش کن."
+    return "⚠️ مشکلی در ارتباط با مدل جمنای پیش آمد. لطفاً دوباره پیام بده!"
 
-# تحلیل تصویر کامل بدون قفل شدن
+# تحلیل تصویر با gemini-3.0-flash
 def analyze_image_with_gemini(photo_bytes, user_question=""):
     if not GEMINI_API_KEY:
         return "❌ کلید API جمنای تنظیم نشده است."
     
     try:
         img = Image.open(io.BytesIO(photo_bytes))
-        prompt = user_question if user_question else "این تصویر را با دقت تحلیل کن و جزییاتش را به فارسی روان توضیح بده."
+        prompt = user_question if user_question else "این تصویر را با دقت تحلیل کن و جزییاتش را به فارسی روان و صمیمی توضیح بده."
         
-        vision_models = ['gemini-1.5-flash', 'gemini-1.5-pro']
+        vision_models = [
+            PRIMARY_MODEL,
+            f"models/{PRIMARY_MODEL}",
+            'gemini-1.5-flash',
+            'models/gemini-1.5-flash'
+        ]
         
         for model_name in vision_models:
             try:
@@ -98,6 +118,13 @@ def analyze_image_with_gemini(photo_bytes, user_question=""):
                     return clean_bot_response(response.text)
             except Exception as model_err:
                 print(f"Vision error on {model_name}: {model_err}", flush=True)
+                try:
+                    model = genai.GenerativeModel(model_name)
+                    response = model.generate_content([f"{SYSTEM_INSTRUCTION}\n\n{prompt}", img])
+                    if response and hasattr(response, 'text') and response.text:
+                        return clean_bot_response(response.text)
+                except Exception as inner_err:
+                    print(f"Inner vision error on {model_name}: {inner_err}", flush=True)
                 continue
 
         return "⚠️ تحلیل تصویر با خطا مواجه شد. لطفاً دوباره عکس را بفرست."
@@ -215,7 +242,7 @@ def process_update_async(data):
             if prompt:
                 process_image_command(chat_id, prompt)
             else:
-                send_message(chat_id, "لطفاً توصیف عکسی که می‌خوای رو جلوی کلمه «عکس:» بنویس.")
+                send_message(chat_id, "لطفاً توصیف عکسی که می‌‌خوای رو جلوی کلمه «عکس:» بنویس.")
             return
 
         # چت متنی عادی
