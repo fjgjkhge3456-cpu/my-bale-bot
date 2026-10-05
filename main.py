@@ -11,7 +11,6 @@ from flask import Flask, request, jsonify
 import google.generativeai as genai
 from PIL import Image
 import io
-from datetime import datetime
 
 app = Flask(__name__)
 
@@ -36,6 +35,22 @@ if GEMINI_API_KEY:
     except Exception as e:
         print(f"!!! خطا در تنظیم API جمنای: {e} !!!", flush=True)
 
+# گرفتن خودکار لیست مدل‌های فعال اکانت شما
+def get_active_models():
+    models = []
+    if GEMINI_API_KEY:
+        try:
+            for m in genai.list_models():
+                if 'generateContent' in m.supported_generation_methods:
+                    models.append(m.name)
+        except Exception as e:
+            print(f"Error listing models: {e}", flush=True)
+    
+    # اگر استعلام خودکار ناموفق بود، مدل‌های جایگزین استاندارد استفاده می‌شوند
+    if not models:
+        models = ['models/gemini-1.5-flash', 'models/gemini-1.5-pro', 'gemini-1.5-flash']
+    return models
+
 def clean_persian_colloquial(prompt):
     words_to_remove = [
         'عکس واقعی:', 'عکس فانتزی:', 'عکس جمنای:', 'عکس فلوکس:', 
@@ -59,15 +74,15 @@ def clean_bot_response(text):
         filtered_lines.append(line)
     return '\n'.join(filtered_lines).strip()
 
-# چت متنی با مدل‌های رسمی و فعال گوگل
+# چت متنی خودکار با مدل‌های فعال اکانت
 def call_gemini_chat(text_prompt):
     if not GEMINI_API_KEY:
         return "❌ کلید API جمنای تنظیم نشده است."
     
-    models_to_try = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro']
+    available_models = get_active_models()
     last_err = ""
     
-    for model_name in models_to_try:
+    for model_name in available_models:
         try:
             model = genai.GenerativeModel(model_name, system_instruction=SYSTEM_INSTRUCTION)
             response = model.generate_content(text_prompt)
@@ -76,23 +91,30 @@ def call_gemini_chat(text_prompt):
         except Exception as e:
             last_err = str(e)
             print(f"Chat error on {model_name}: {e}", flush=True)
+            try:
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(f"{SYSTEM_INSTRUCTION}\n\n{text_prompt}")
+                if response and hasattr(response, 'text') and response.text:
+                    return clean_bot_response(response.text)
+            except Exception as inner_e:
+                print(f"Inner error on {model_name}: {inner_e}", flush=True)
             continue
             
-    return f"⚠️ خطای ارتباط با جمنای: {last_err}" if last_err else "⚠️ مشکلی در پاسخگویی پیش آمد."
+    return f"⚠️ خطای جمنای: {last_err}" if last_err else "⚠️ مشکلی در پاسخگویی پیش آمد."
 
-# تحلیل تصویر با مدل‌های استاندارد
+# تحلیل تصویر خودکار با مدل‌های فعال اکانت
 def analyze_image_with_gemini(photo_bytes, user_question=""):
     if not GEMINI_API_KEY:
         return "❌ کلید API جمنای تنظیم نشده است."
     
     try:
         img = Image.open(io.BytesIO(photo_bytes))
-        prompt = user_question if user_question else "این تصویر را با دقت تحلیل کن و جزییاتش را به فارسی روان توضیح بده."
+        prompt = user_question if user_question else "این تصویر را با دقت تحلیل کن و جزییاتش را به فارسی روان و صمیمی توضیح بده."
         
-        vision_models = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro']
+        available_models = get_active_models()
         last_err = ""
         
-        for model_name in vision_models:
+        for model_name in available_models:
             try:
                 model = genai.GenerativeModel(model_name, system_instruction=SYSTEM_INSTRUCTION)
                 response = model.generate_content([prompt, img])
@@ -101,6 +123,13 @@ def analyze_image_with_gemini(photo_bytes, user_question=""):
             except Exception as model_err:
                 last_err = str(model_err)
                 print(f"Vision error on {model_name}: {model_err}", flush=True)
+                try:
+                    model = genai.GenerativeModel(model_name)
+                    response = model.generate_content([f"{SYSTEM_INSTRUCTION}\n\n{prompt}", img])
+                    if response and hasattr(response, 'text') and response.text:
+                        return clean_bot_response(response.text)
+                except Exception as inner_err:
+                    print(f"Inner vision error on {model_name}: {inner_err}", flush=True)
                 continue
 
         return f"⚠️ تحلیل تصویر با خطا مواجه شد: {last_err}"
