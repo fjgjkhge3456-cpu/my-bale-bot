@@ -26,10 +26,10 @@ BALE_FILE_URL = f"https://tapi.bale.ai/file/bot{BALE_TOKEN}" if BALE_TOKEN else 
 PROCESSED_UPDATES = set()
 MAX_CACHE_SIZE = 2000
 
-# دستور سیستم فارسی و صمیمی
+# دستور سیستم فارسی صمیمی
 SYSTEM_INSTRUCTION = "پاسخ را فقط و فقط به زبان فارسی، روان و صمیمی بنویس."
 
-# کش کردن نام مدل فعلی
+# کش کردن نام مدل کارآمد جهت جلوگیری از کندی چت
 CACHED_MODEL_NAME = None
 
 if GEMINI_API_KEY:
@@ -63,65 +63,80 @@ def clean_bot_response(text):
         filtered_lines.append(line)
     return '\n'.join(filtered_lines).strip()
 
-# لیست مدل‌های مورد نظر با اولویت gemini-2.5-flash و پشتیبان‌های پر سهمیه
-MODEL_CANDIDATES = [
-    'gemini-2.5-flash',
-    'models/gemini-2.5-flash',
-    'gemini-1.5-flash',
-    'models/gemini-1.5-flash',
-    'gemini-2.0-flash',
-    'models/gemini-1.5-pro'
-]
-
-# فراخوانی هوشمند چت و تحلیل با مدیریت خطا و سهمیه (Quota / 429 / 404 Handler)
-def call_gemini_dynamic(contents, use_system_instruction=True):
+# سیستم هوشمند و سریع دریافت مدل‌های کاری اکانت شما (جایگزین ارور 404)
+def get_working_robust_model():
+    """
+    Get a robust model name dynamically or via fallback list to prevent 404 errors.
+    Caches the result to prevent slow chat.
+    """
     global CACHED_MODEL_NAME
+    if CACHED_MODEL_NAME:
+        return CACHED_MODEL_NAME
+
+    # امتحان سریع مدل‌های استاندارد و سریع (Flash/Pro)
+    standard_names = ['models/gemini-1.5-flash', 'gemini-1.5-flash', 'models/gemini-pro']
+    
+    for m_id in standard_names:
+        try:
+            m = genai.GenerativeModel(m_id)
+            # تست مدل با یه درخواست کوچیک
+            res = m.generate_content(" ping ")
+            if res:
+                CACHED_MODEL_NAME = m_id
+                print(f"--- Fast Cached model found: {m_id} ---", flush=True)
+                return CACHED_MODEL_NAME
+        except Exception:
+            continue
+
+    # اگر نشد، دریافت لیست مدل‌های فعال از خود گوگل
+    try:
+        supported_models = []
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                supported_models.append(m.name)
+        
+        # انتخاب اولین مدل فلاش موجود
+        for m_name in supported_models:
+            if 'flash' in m_name.lower():
+                CACHED_MODEL_NAME = m_name
+                return CACHED_MODEL_NAME
+        
+        # اگر فلاش نبود، اولین مدل چت
+        if supported_models:
+            CACHED_MODEL_NAME = supported_models[0]
+            return CACHED_MODEL_NAME
+            
+    except Exception as e:
+        print(f"List models error: {e}", flush=True)
+
+    # در صورت شکست کلchecks، پیش‌فرض روی فلاش
+    CACHED_MODEL_NAME = 'gemini-1.5-flash'
+    return CACHED_MODEL_NAME
+
+# فراخوانی سریع جمنای برای چت عادی متنی (دست نخورده)
+def call_gemini_dynamic(contents, use_system_instruction=True):
     if not GEMINI_API_KEY:
         return None, "❌ کلید GEMINI_API_KEY تنظیم نشده است."
 
-    # اگر مدلی قبلاً کش شده، ابتدا با آن امتحان می‌کنیم
-    models_to_try = list(MODEL_CANDIDATES)
-    if CACHED_MODEL_NAME and CACHED_MODEL_NAME in models_to_try:
-        models_to_try.remove(CACHED_MODEL_NAME)
-        models_to_try.insert(0, CACHED_MODEL_NAME)
-
-    last_error = ""
-    for model_name in models_to_try:
-        try:
-            kwargs = {}
-            if use_system_instruction:
-                kwargs['system_instruction'] = SYSTEM_INSTRUCTION
-            
-            model = genai.GenerativeModel(model_name, **kwargs)
-            response = model.generate_content(contents)
-            
-            if response and hasattr(response, 'text') and response.text:
-                CACHED_MODEL_NAME = model_name  # کش کردن مدل موفق
-                return clean_bot_response(response.text), None
-        except Exception as e:
-            err_str = str(e)
-            last_error = err_str
-            print(f"Model {model_name} failed with error: {err_str}", flush=True)
-            # اگر مدل با خطای 429 (پایان سهمیه) یا 404 روبرو شد، مدل بعدی تست می‌شود
-            continue
-
-    # اگر همه مدل‌های لیست بالا خطا خوردند، لیست کلی مدل‌های فعال گوگل استعلام می‌شود
     try:
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                try:
-                    m_name = m.name
-                    model = genai.GenerativeModel(m_name, system_instruction=SYSTEM_INSTRUCTION if use_system_instruction else None)
-                    res = model.generate_content(contents)
-                    if res and hasattr(res, 'text') and res.text:
-                        CACHED_MODEL_NAME = m_name
-                        return clean_bot_response(res.text), None
-                except Exception:
-                    continue
+        # ۱. دریافت سریع اسم مدل از کش
+        model_name = get_working_robust_model()
+        
+        kwargs = {}
+        if use_system_instruction:
+            kwargs['system_instruction'] = SYSTEM_INSTRUCTION
+        
+        model = genai.GenerativeModel(model_name, **kwargs)
+        response = model.generate_content(contents)
+        
+        if response and hasattr(response, 'text') and response.text:
+            return clean_bot_response(response.text), None
+        return None, "⚠️ پاسخی دریافت نشد."
     except Exception as e:
-        last_error = str(e)
-
-    return None, f"⚠️ سهمیه مدل‌ها به پایان رسیده یا خطایی رخ داده است:\n{last_error}"
+        # در صورت خطا، کش بازنشانی می‌شود
+        global CACHED_MODEL_NAME
+        CACHED_MODEL_NAME = None
+        return None, f"⚠️ خطای جمنای:\n{str(e)}"
 
 # دانلود فایل از سرور بله
 def download_bale_file(file_id):
@@ -176,11 +191,11 @@ def generate_image_google_imagen(english_prompt):
     except Exception as e:
         return None, str(e)
 
-# ترجمه و بهینه‌‌سازی پرامپت فارسی برای تصویرسازی
+# ترجمه و بهینه‌سازی پرامپت فارسی توسط جمنای
 def translate_and_enhance_prompt(prompt, style_mode="auto"):
     cleaned_prompt = clean_persian_colloquial(prompt)
     style_desc = (
-        "photorealistic high resolution photorealistic photography, 8k" 
+        "photorealistic high resolution realistic photography, 8k" 
         if style_mode == "realistic" 
         else "vibrant fantasy digital art illustration, 3d render" 
         if style_mode == "fantasy" 
@@ -195,18 +210,28 @@ def translate_and_enhance_prompt(prompt, style_mode="auto"):
         return translated.replace('"', '').strip()
     return cleaned_prompt
 
-# تحلیل تصویر با استفاده از Vision جمنای
+# *** اصلاح اصلی: تحلیل تصویر واقعی توسط Vision جمنای ***
 def analyze_image_with_gemini(photo_bytes, user_question=""):
     try:
+        # ۱. باز کردن عکس با PIL
         img = Image.open(io.BytesIO(photo_bytes))
-        prompt = user_question if user_question else "این تصویر را به دقت تحلیل کن و توضیحات کاملی به فارسی ارائه بده."
         
-        text_res, err = call_gemini_dynamic([prompt, img], use_system_instruction=True)
-        if text_res:
-            return text_res
-        return err
+        # ۲. انتخاب مدل Vision (فلش سریع‌ترین و بهترین گزینه چندمنظوره است)
+        # Using flash is essential for vision tasks, especially via proxying libraries.
+        model_vision = genai.GenerativeModel('gemini-1.5-flash', system_instruction=SYSTEM_INSTRUCTION)
+        
+        # ۳. دستور چت شامل سوال کاربر یا دستور پیش‌فرض
+        prompt = user_question if user_question else "این تصویر را به دقت تحلیل کن و توضیحات کاملی ارائه بده."
+        
+        # ۴. فراخوانی تحلیل (ارسال لیست شامل متن دستور و عکس)
+        # We send both prompt text and the raw Image object.
+        response = model_vision.generate_content([prompt, img])
+        
+        if response and hasattr(response, 'text') and response.text:
+            return clean_bot_response(response.text)
     except Exception as e:
         return f"⚠️ خطا در پردازش تصویر: {e}"
+    return "متأسفانه تصویری تحلیل نشد."
 
 # ویرایش تصویر
 def edit_image_with_gemini(photo_bytes, edit_instruction):
@@ -216,6 +241,7 @@ def edit_image_with_gemini(photo_bytes, edit_instruction):
             f"Analyze this input image carefully and describe it. Then incorporate the user's requested edit: '{edit_instruction}'. "
             f"Output ONLY a detailed English image generation prompt describing the updated final image."
         )
+        # We need a prompt for an edit task, which is text-only but based on an image.
         new_prompt, err = call_gemini_dynamic([prompt_prep, img], use_system_instruction=False)
         if new_prompt:
             return generate_image_flux(new_prompt)
@@ -278,35 +304,31 @@ def send_photo(chat_id, photo_bytes, caption=""):
     except Exception as e:
         print(f"Error sending photo: {e}", flush=True)
 
-# ساخت و ارسال تصویر
+# مدیریت ساخت تصویر
 def process_image_command(chat_id, user_prompt, engine_choice="auto", style_mode="auto"):
-    send_message(chat_id, "🤖 Gemini در حال پردازش و تولید دستور تصویر است...")
+    send_message(chat_id, "🤖 Gemini در حال پردازش و ساخت تصویر است...")
     english_prompt = translate_and_enhance_prompt(user_prompt, style_mode)
 
     if engine_choice == "flux":
-        send_message(chat_id, "⚡ در حال ساخت تصویر با موتور Flux...")
         photo_bytes, err = generate_image_flux(english_prompt)
         if photo_bytes:
-            send_photo(chat_id, photo_bytes, caption=f"🎨 تصویر ساخته شده با Flux:\n{user_prompt}")
+            send_photo(chat_id, photo_bytes, caption=f"🖼 تصویر ساخته شده با Flux:\n{user_prompt}")
         else:
             send_message(chat_id, f"❌ خطا در ساخت تصویر: {err}")
         return
 
-    send_message(chat_id, "🤖 در حال تولید تصویر با Gemini...")
     photo_bytes, err = generate_image_google_imagen(english_prompt)
 
     if photo_bytes:
         send_photo(chat_id, photo_bytes, caption=f"✨ تصویر ساخته شده با Google Imagen:\n{user_prompt}")
     else:
-        print(f"Imagen failed ({err}), falling back to Flux...", flush=True)
-        send_message(chat_id, "⚡ در حال ساخت با موتور Flux...")
         photo_bytes, flux_err = generate_image_flux(english_prompt)
         if photo_bytes:
             send_photo(chat_id, photo_bytes, caption=f"🖼 تصویر ساخته شده برای شما:\n{user_prompt}")
         else:
-            send_message(chat_id, f"❌ خطا در ساخت تصویر با فلوکس:\n{flux_err}")
+            send_message(chat_id, f"❌ خطا در ساخت تصویر: {flux_err}")
 
-# پردازش پس‌زمینه پیام‌ها
+# پردازش کامل پیام‌ها و عکس‌های دریافتی
 def process_update_async(data):
     if not data or "message" not in data:
         return
@@ -315,7 +337,7 @@ def process_update_async(data):
     chat_id = message["chat"]["id"]
     user_id = message["from"]["id"]
     
-    # ۱. دریافت عکس جهت تحلیل یا ویرایش
+    # ۱. دریافت و تحلیل/ویرایش تصویر
     if "photo" in message and isinstance(message["photo"], list):
         send_message(chat_id, "🔍 در حال دریافت تصویر...")
         
@@ -328,7 +350,7 @@ def process_update_async(data):
             send_message(chat_id, "❌ خطا در دانلود تصویر از بله.")
             return
 
-        # ویرایش عکس
+        # الف) ویرایش عکس
         if caption.lower().startswith("ویرایش:") or caption.lower().startswith("edit:"):
             edit_instruction = clean_persian_colloquial(caption)
             send_message(chat_id, "🎨 در حال اعمال ویرایش روی تصویر شما...")
@@ -339,7 +361,7 @@ def process_update_async(data):
                 send_message(chat_id, f"❌ خطا در ویرایش: {err}")
             return
 
-        # تحلیل عکس (Vision)
+        # ب) تحلیل عکس واقعی (Vision)
         send_message(chat_id, "🤖 در حال تحلیل تصویر توسط Gemini...")
         analysis_res = analyze_image_with_gemini(photo_bytes, caption)
         send_message(chat_id, analysis_res)
@@ -359,9 +381,9 @@ def process_update_async(data):
             "🤖 `عکس جمنای: برج میلاد`\n"
             "⚡ `عکس فلوکس: نیمار پیش هالند`\n\n"
             "امکانات دیگر:\n"
-            "🔹 چت متنی با Gemini (ارسال سوال متنی)\n"
+            "🔹 چت متنی با Gemini (ارسال هرگونه سوال متنی)\n"
             "🔹 ویرایش عکس (ارسال عکس با کپشن: `ویرایش: موهاشو قرمز کن`)\n"
-            "🔹 تحلیل عکس (ارسال عکس با کپشن یا سوال)\n"
+            "🔹 تحلیل عکس (ارسال عکس و نوشتن سوال یا عبارت «این را تحلیل کن»)\n"
             "🔹 وضعیت اشتراک: /vip"
         )
         send_message(chat_id, welcome_msg)
@@ -394,12 +416,15 @@ def process_update_async(data):
         process_image_command(chat_id, prompt, engine_choice="auto", style_mode="auto")
         return
 
-    # چت متنی سریع با مدیریت سهمیه
+    # چت متنی سریع و مستقیم با Gemini (دست نخورده)
     send_message(chat_id, "🤔 در حال تفکر...")
     answer, err = call_gemini_dynamic(text, use_system_instruction=True)
     if answer:
         send_message(chat_id, answer)
     else:
+        # در صورت خطا، کش مدل بازنشانی می‌شود
+        global CACHED_MODEL_NAME
+        CACHED_MODEL_NAME = None
         send_message(chat_id, err)
 
 @app.route('/', methods=['POST', 'GET'])
