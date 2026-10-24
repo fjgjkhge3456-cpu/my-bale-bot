@@ -1,11 +1,7 @@
 import os
-import json
-import sqlite3
 import requests
 import threading
 import urllib.parse
-import re
-import base64
 import random
 from flask import Flask, request, jsonify
 import google.generativeai as genai
@@ -17,7 +13,6 @@ app = Flask(__name__)
 # دریافت تنظیمات محیطی
 BALE_TOKEN = os.environ.get("BALE_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-ADMIN_ID = os.environ.get("ADMIN_ID")
 
 BALE_API_URL = f"https://tapi.bale.ai/bot{BALE_TOKEN}" if BALE_TOKEN else ""
 BALE_FILE_URL = f"https://tapi.bale.ai/file/bot{BALE_TOKEN}" if BALE_TOKEN else ""
@@ -35,32 +30,8 @@ if GEMINI_API_KEY:
     except Exception as e:
         print(f"!!! خطا در تنظیم API جمنای: {e} !!!", flush=True)
 
-# گرفتن خودکار لیست مدل‌های فعال اکانت شما
-def get_active_models():
-    models = []
-    if GEMINI_API_KEY:
-        try:
-            for m in genai.list_models():
-                if 'generateContent' in m.supported_generation_methods:
-                    models.append(m.name)
-        except Exception as e:
-            print(f"Error listing models: {e}", flush=True)
-    
-    # اگر استعلام خودکار ناموفق بود، مدل‌های جایگزین استاندارد استفاده می‌شوند
-    if not models:
-        models = ['models/gemini-1.5-flash', 'models/gemini-1.5-pro', 'gemini-1.5-flash']
-    return models
-
-def clean_persian_colloquial(prompt):
-    words_to_remove = [
-        'عکس واقعی:', 'عکس فانتزی:', 'عکس جمنای:', 'عکس فلوکس:', 
-        'واقعی:', 'فانتزی:', 'جمنای:', 'فلوکس:', 'عکس:', 'ویرایش:',
-        'بزن', 'بیار', 'برام بیار', 'بکش', 'درست کن', 'بفرست'
-    ]
-    cleaned = prompt
-    for w in words_to_remove:
-        cleaned = cleaned.replace(w, '')
-    return cleaned.strip()
+# مدل‌های ثابت و پرسرعت (برای جلوگیری از تاخیر و کندی در پاسخگویی)
+MODELS_TO_TRY = ['gemini-1.5-flash', 'gemini-2.5-flash', 'gemini-1.5-pro']
 
 def clean_bot_response(text):
     if not text:
@@ -74,65 +45,43 @@ def clean_bot_response(text):
         filtered_lines.append(line)
     return '\n'.join(filtered_lines).strip()
 
-# چت متنی خودکار با مدل‌های فعال اکانت
+# چت متنی پرسرعت
 def call_gemini_chat(text_prompt):
     if not GEMINI_API_KEY:
         return "❌ کلید API جمنای تنظیم نشده است."
     
-    available_models = get_active_models()
-    last_err = ""
-    
-    for model_name in available_models:
+    for model_name in MODELS_TO_TRY:
         try:
             model = genai.GenerativeModel(model_name, system_instruction=SYSTEM_INSTRUCTION)
             response = model.generate_content(text_prompt)
             if response and hasattr(response, 'text') and response.text:
                 return clean_bot_response(response.text)
         except Exception as e:
-            last_err = str(e)
             print(f"Chat error on {model_name}: {e}", flush=True)
-            try:
-                model = genai.GenerativeModel(model_name)
-                response = model.generate_content(f"{SYSTEM_INSTRUCTION}\n\n{text_prompt}")
-                if response and hasattr(response, 'text') and response.text:
-                    return clean_bot_response(response.text)
-            except Exception as inner_e:
-                print(f"Inner error on {model_name}: {inner_e}", flush=True)
             continue
             
-    return f"⚠️ خطای جمنای: {last_err}" if last_err else "⚠️ مشکلی در پاسخگویی پیش آمد."
+    return "⚠️ متأسفانه در حال حاضر خطایی در پاسخگویی هوش مصنوعی رخ داد."
 
-# تحلیل تصویر خودکار با مدل‌های فعال اکانت
+# تحلیل تصویر پرسرعت
 def analyze_image_with_gemini(photo_bytes, user_question=""):
     if not GEMINI_API_KEY:
         return "❌ کلید API جمنای تنظیم نشده است."
     
     try:
         img = Image.open(io.BytesIO(photo_bytes))
-        prompt = user_question if user_question else "این تصویر را با دقت تحلیل کن و جزییاتش را به فارسی روان و صمیمی توضیح بده."
+        prompt = user_question if user_question else "این تصویر را با دقت تحلیل کن و جزئیاتش را به فارسی روان و صمیمی توضیح بده."
         
-        available_models = get_active_models()
-        last_err = ""
-        
-        for model_name in available_models:
+        for model_name in MODELS_TO_TRY:
             try:
                 model = genai.GenerativeModel(model_name, system_instruction=SYSTEM_INSTRUCTION)
                 response = model.generate_content([prompt, img])
                 if response and hasattr(response, 'text') and response.text:
                     return clean_bot_response(response.text)
             except Exception as model_err:
-                last_err = str(model_err)
                 print(f"Vision error on {model_name}: {model_err}", flush=True)
-                try:
-                    model = genai.GenerativeModel(model_name)
-                    response = model.generate_content([f"{SYSTEM_INSTRUCTION}\n\n{prompt}", img])
-                    if response and hasattr(response, 'text') and response.text:
-                        return clean_bot_response(response.text)
-                except Exception as inner_err:
-                    print(f"Inner vision error on {model_name}: {inner_err}", flush=True)
                 continue
 
-        return f"⚠️ تحلیل تصویر با خطا مواجه شد: {last_err}"
+        return "⚠️ تحلیل تصویر در حال حاضر با خطا مواجه شد."
     except Exception as e:
         return f"⚠️ خطا در پردازش فایل تصویر: {e}"
 
@@ -176,7 +125,7 @@ def generate_image_flux(english_prompt):
         rand_seed = random.randint(1, 999999)
         image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?model=flux&width=1024&height=1024&nologo=true&seed={rand_seed}"
         headers = {'User-Agent': 'Mozilla/5.0'}
-        res = requests.get(image_url, headers=headers, timeout=45)
+        res = requests.get(image_url, headers=headers, timeout=35)
         if res.status_code == 200:
             return res.content, None
         return None, f"خطای سرور تصویرساز ({res.status_code})"
@@ -184,7 +133,7 @@ def generate_image_flux(english_prompt):
         return None, str(e)
 
 def translate_prompt(prompt):
-    cleaned = clean_persian_colloquial(prompt)
+    cleaned = prompt.replace("عکس:", "").replace("عکس", "").strip()
     p = f"Translate to clear English image prompt: '{cleaned}'. Return only plain text."
     res = call_gemini_chat(p)
     return res.replace('"', '').strip() if res else cleaned
@@ -196,7 +145,7 @@ def process_image_command(chat_id, user_prompt):
     if photo_bytes:
         send_photo(chat_id, photo_bytes, caption=f"🖼 تصویر ساخته شده برای:\n{user_prompt}")
     else:
-        send_message(chat_id, f"❌ خطا در ساخت تصویر: {err}")
+        send_message(chat_id, f"❌ خطا در ساخت تصویر: لطفاً دوباره تلاش کنید.")
 
 def process_update_async(data):
     try:
@@ -270,7 +219,7 @@ def webhook():
             PROCESSED_UPDATES.clear()
 
     threading.Thread(target=process_update_async, args=(data,)).start()
-    return jsonify({"status": "ok"}), 200
+    return jsonify({"status": "ok"}}, 200
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
