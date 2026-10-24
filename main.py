@@ -30,7 +30,7 @@ if GEMINI_API_KEY:
     except Exception as e:
         print(f"!!! خطا در تنظیم API جمنای: {e} !!!", flush=True)
 
-# مدل‌های ثابت و پرسرعت (برای جلوگیری از تاخیر و کندی در پاسخگویی)
+# مدل‌های ثابت و پرسرعت
 MODELS_TO_TRY = ['gemini-1.5-flash', 'gemini-2.5-flash', 'gemini-1.5-pro']
 
 def clean_bot_response(text):
@@ -45,7 +45,6 @@ def clean_bot_response(text):
         filtered_lines.append(line)
     return '\n'.join(filtered_lines).strip()
 
-# چت متنی پرسرعت
 def call_gemini_chat(text_prompt):
     if not GEMINI_API_KEY:
         return "❌ کلید API جمنای تنظیم نشده است."
@@ -62,7 +61,6 @@ def call_gemini_chat(text_prompt):
             
     return "⚠️ متأسفانه در حال حاضر خطایی در پاسخگویی هوش مصنوعی رخ داد."
 
-# تحلیل تصویر پرسرعت
 def analyze_image_with_gemini(photo_bytes, user_question=""):
     if not GEMINI_API_KEY:
         return "❌ کلید API جمنای تنظیم نشده است."
@@ -219,7 +217,7 @@ def webhook():
             PROCESSED_UPDATES.clear()
 
     threading.Thread(target=process_update_async, args=(data,)).start()
-    return jsonify({"status": "ok"}}, 200
+    return jsonify({"status": "ok"}), 200
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
